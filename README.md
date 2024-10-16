@@ -1,5 +1,7 @@
 # modify
 
+Install using `pip install -e .`
+
 A library for converting PyTorch models _entirely_ to modules, and for easily modifying them (e.g adding LoRA adapters and the like).
 The key ideas are:
   * Everything is a `modify.ModifyModule`, and `modify.ModifyModule` is a subtype of `torch.Module`.
