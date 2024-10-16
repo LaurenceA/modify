@@ -1,7 +1,6 @@
 # modify
 
 A library for converting PyTorch models _entirely_ to modules, and for easily modifying them (e.g adding LoRA adapters and the like).
-
 The key ideas are:
   * Everything is a `modify.ModifyModule`, and `modify.ModifyModule` is a subtype of `torch.Module`.
   * Modules can only be joined using `modify.Sequential` and `modify.Parallel`:
@@ -39,9 +38,10 @@ New modules:
 
 
 TODO:
-* Set up tests with pytest.
+* Self Attention.
+* Set up tests with pytest, in a separate folder.
+* Set up examples in a separate examples folder.
 * Docs.
-* Standard ResNet + Transformer examples.
-* Self Attention
-* Load up e.g. Llama3 weights.
+* Standard ResNet + nanoGPT examples.
+* Work out how to load up pre-existing weights, e.g. from Llama3 weights.
 
