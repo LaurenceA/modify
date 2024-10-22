@@ -1,5 +1,6 @@
 import inspect
 from numbers import Number
+from warnings import warn
 
 import torch
 import torch.nn as nn
@@ -32,7 +33,7 @@ class ModifyModuleGroup(_ModifyModule):
 
         for mod in self.mods.values():
             if not isinstance(mod, ModifyModule):
-                raise Exception("Module not recognised (not a subtype of ModifyModule). If you're trying to use a batchnorm module, you need to use the modify wrapper (e.g. torch.nn.BatchNorm1d -> modify.BatchNorm1d), which gives a parameter-free batchnorm. Use an explicit modify.Affine layer afterwards if you want that.")
+                warn("Module not recognised (not a subtype of ModifyModule). If you're trying to use a batchnorm module, you need to use the modify wrapper (e.g. torch.nn.BatchNorm1d -> modify.BatchNorm1d), which gives a parameter-free batchnorm. Use an explicit modify.Affine layer afterwards if you want that.")
 
         self.module_list = nn.ModuleList(self.mods.values())
 
@@ -175,6 +176,7 @@ class TupleArgFunction(Function):
 
 
 #Classes that describe the type of operation
+class _Identity: pass #Just passes the input straight to the output, often does something like printing at the same time
 class _Restructure: pass #Something like view, that just shuffles around elements of the input.
 class _Elementwise: pass #Operates on elements of the input independently.
 class _Vector: pass #Operates on vectors of the input independently.  Must have a dim argument.
@@ -245,6 +247,8 @@ unary_restructure_methods = {
     'triu': 'TriU',
     'view': 'View',
     'view_as': 'ViewAs',
+    'bind': 'Bind',
+    'unbind': 'UnBind',
 }
 
 for method_name, class_name in unary_restructure_methods.items():
@@ -497,7 +501,7 @@ class Copy(_ModifyModule,_Unary,_Elementwise,_ParamFree,_Linear):
     def forward(self, x):
         return self.number_of_copies * (x,)
 
-class Debug(_ModifyModule,_ParamFree,_Linear): pass
+class Debug(_ModifyModule,_ParamFree,_Identity): pass
 
 class BreakPoint(Debug):
     def forward(self, x):
@@ -533,6 +537,77 @@ class PrintShape(DebugPrint):
         validate_tuple_or_tensor(x)
         print_shape(x)
         return x
+
+class ViewMerge(_ModifyModule):
+    def __init__(self, dim0, dim1):
+        super().__init__()
+        self.dim0 = dim0
+        self.dim1 = dim1
+        assert self.dim0+1 == self.dim1
+
+    def forward(self, x):
+        """
+        Takes two dimensions that are adjacent, and uses reshape to merge them.
+        """
+        if dim0 < 0:
+            dim0 = x.ndim + self.dim0
+        else:
+            dim0 = self.dim0
+
+        if dim1 < 0:
+            dim1 = x.ndim + self.dim1
+        else:
+            dim1 = self.dim1
+
+        return x.reshape(*x.shape[:dim0], dim0*dim1, *x.shape[(dim1+1):])
+
+class ViewUnMerge(_ModifyModule):
+    def __init__(self, dim, n0=None, n1=None):
+        super().__init__()
+        self.dim = dim
+        self.n0 = n0
+        self.n1 = n1
+        assert (n0 is not None) or (n1 is not None)
+
+    def forward(self, x):
+        """
+        Takes a single dimension, and splits it into two dimensions using view.
+        n0 is the size of the first dimension, and n1 is the size of the second dimension.
+        if both 
+        """
+        if self.dim < 0:
+            dim = x.ndim + self.dim
+        else:
+            dim = self.dim
+
+        n0_n1 = x.shape[dim]
+        if self.n0 is None:
+            assert self.n1 is not None
+            self.n0 = n0_n1 // self.n1
+        if self.n1 is None:
+            assert self.n0 is not None
+            self.n1 = n0_n1 // self.n0
+            
+        if (self.n0 is not None) and (self.n1 is not None):
+            assert x.shape[dim] == self.n0*self.n1
+
+        return x.view(*x.shape[:dim], self.n0, self.n1, *x.shape[(dim+1):])
+
+class AssertShape(Debug):
+    def __init__(self, ndim, shape, dtype, device):
+        self.ndim = ndim
+        self.shape = shape
+        self.dtype = dtype
+        self.device = device
+
+    def forward(self, x):
+        assert self.ndim == x.ndim
+        for (self_shape, x_shape) in zip(self.shape, x.shape):
+            if self_shape is not None:
+                assert self_shape == x_shape
+        assert self.dtype == x.dtype
+        assert self.device == x.device
+        
             
 
 TorchLearnedLinear = (
