@@ -480,12 +480,14 @@ class ElementwiseAffine(_ModifyModule,_Unary,_Elementwise,_Param,_Linear):
     """
     def __init__(self, shape, bias=True):
         super().__init__()
-        self.weights = nn.Parameter(t.ones(shape))
-        self.bias = nn.Parameter(t.zeros(shape)) if bias else None
+        if isinstance(shape, int):
+            shape = (shape,)
+        self.weights = nn.Parameter(torch.ones(shape))
+        self.bias = nn.Parameter(torch.zeros(shape)) if bias else None
 
     def forward(self, x):
         result = self.weights * x
-        if bias is not None:
+        if self.bias is not None:
             result = result + bias
         return result
 
