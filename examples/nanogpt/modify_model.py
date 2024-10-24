@@ -60,14 +60,15 @@ def Residual(modules):
 
 def Block(config):
     r1 = Residual(modify.Sequential([
-        nn.LayerNorm(config.n_embd, bias=config.bias),
-        #modify.LayerNorm(config.n_embd),
-        #modify.ElementwiseAffine(config.n_embd, bias=config.bias),
+        #nn.LayerNorm(config.n_embd, bias=config.bias),
+        modify.LayerNorm(config.n_embd),
+        modify.ElementwiseAffine(config.n_embd, bias=config.bias),
         CausalSelfAttention(config),
     ]))
     r2 = Residual(modify.Sequential([
-        nn.LayerNorm(config.n_embd, bias=config.bias),
-        #modify.ElementwiseAffine(config.n_embd, bias=config.bias),
+        #nn.LayerNorm(config.n_embd, bias=config.bias),
+        modify.LayerNorm(config.n_embd),
+        modify.ElementwiseAffine(config.n_embd, bias=config.bias),
         MLP(config),
     ]))
     return modify.Sequential([r1, r2])
@@ -85,7 +86,11 @@ class ModifyGPT(nn.Module):
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd, bias=config.bias),
+            #ln_f = nn.LayerNorm(config.n_embd, bias=config.bias),
+            ln_f = modify.Sequential([
+                modify.LayerNorm(config.n_embd),
+                modify.ElementwiseAffine(config.n_embd, bias=config.bias),
+            ])
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
