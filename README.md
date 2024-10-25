@@ -2,8 +2,7 @@
 
 Install using `pip install -e .`
 
-A library for converting PyTorch models _entirely_ to modules, and for easily modifying them (e.g adding LoRA adapters and the like).
-The key ideas are:
+A library for converting PyTorch models _entirely_ to modules, and for easily modifying them (e.g adding LoRA adapters and the like).  The key ideas are:
   * Everything is a `modify.ModifyModule`, and `modify.ModifyModule` is a subtype of `torch.Module`.
   * Values flowing through `modify` networks are either torch tensors, or (possibly nested) tuples of torch tensors.
   * Modules can only be joined using `modify.Sequential` and `modify.Parallel`:
@@ -47,4 +46,4 @@ TODO:
 * Docs.
 * Standard ResNet + nanoGPT examples.
 * Work out how to load up pre-existing weights, e.g. from Llama3 weights.
-
+* Linear (and Conv etc.) modules that allow you to pass weight_init and bias_init as PyTorch distributions.

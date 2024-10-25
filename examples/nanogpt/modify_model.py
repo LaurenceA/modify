@@ -60,13 +60,11 @@ def Residual(modules):
 
 def Block(config):
     r1 = Residual(modify.Sequential([
-        #nn.LayerNorm(config.n_embd, bias=config.bias),
         modify.LayerNorm(config.n_embd),
         modify.ElementwiseAffine(config.n_embd, bias=config.bias),
         CausalSelfAttention(config),
     ]))
     r2 = Residual(modify.Sequential([
-        #nn.LayerNorm(config.n_embd, bias=config.bias),
         modify.LayerNorm(config.n_embd),
         modify.ElementwiseAffine(config.n_embd, bias=config.bias),
         MLP(config),
@@ -81,29 +79,26 @@ class ModifyGPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            #ln_f = nn.LayerNorm(config.n_embd, bias=config.bias),
-            ln_f = modify.Sequential([
+        self.transformer = modify.Sequential([
+            modify.Parallel({
+                'wte': nn.Embedding(config.vocab_size, config.n_embd),
+                'wpe': nn.Embedding(config.block_size, config.n_embd),
+            }),
+            modify.Add(),
+            nn.Dropout(config.dropout),
+            *[Block(config) for _ in range(config.n_layer)],
+            modify.Sequential([
                 modify.LayerNorm(config.n_embd),
                 modify.ElementwiseAffine(config.n_embd, bias=config.bias),
-            ])
-        ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        # Laurence: Turn off weight tying!
-        #self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+            ]),
+            nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        ])
 
         # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
+            print(pn)
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
@@ -136,21 +131,14 @@ class ModifyGPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
+        logits = self.transformer((idx, pos))
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = logits[:, [-1], :] # note: using list [-1] to preserve the time dim
             loss = None
 
         return logits, loss
