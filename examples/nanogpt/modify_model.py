@@ -16,12 +16,12 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 import modify
-from modify import _ModifyModule
 
-class SDPA(_ModifyModule):
+class SDPA(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.n_head = config.n_head
+        self.dropout = config.dropout
 
     def forward(self, kqv):
         k, q, v = kqv
@@ -29,7 +29,7 @@ class SDPA(_ModifyModule):
         k = k.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
         q = q.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
         v = v.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True, dropout_p=self.dropout if self.training else 0)
         return y.transpose(1, 2).contiguous().view(B, T, n_embd) # re-assemble all head outputs side by side
 
 def CausalSelfAttention(config):
@@ -39,6 +39,7 @@ def CausalSelfAttention(config):
         modify.UnBind(dim=-2),                                  #(B, T, n_embd),(B, T, n_embd), (B, T, n_embd)
         SDPA(config),                                           #B, T, n_embd
         nn.Linear(config.n_embd, config.n_embd, bias=config.bias),
+        nn.Dropout(config.dropout),
     ])
 
 def MLP(config):
@@ -46,6 +47,7 @@ def MLP(config):
         'c_fc': nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias),   #B, T, 4*n_embd
         'gelu': nn.GELU(),                                                       #B, T, 4*n_embd
         'c_proj': nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias), #B, T, n_embd
+        'dropout': nn.Dropout(config.dropout),
     })
 
 def Residual(modules):
@@ -60,13 +62,11 @@ def Residual(modules):
 
 def Block(config):
     r1 = Residual(modify.Sequential([
-        modify.LayerNorm(config.n_embd),
-        modify.ElementwiseAffine(config.n_embd, bias=config.bias),
+        nn.LayerNorm(config.n_embd, bias=config.bias),
         CausalSelfAttention(config),
     ]))
     r2 = Residual(modify.Sequential([
-        modify.LayerNorm(config.n_embd),
-        modify.ElementwiseAffine(config.n_embd, bias=config.bias),
+        nn.LayerNorm(config.n_embd, bias=config.bias),
         MLP(config),
     ]))
     return modify.Sequential([r1, r2])
@@ -85,11 +85,9 @@ class ModifyGPT(nn.Module):
                 'wpe': nn.Embedding(config.block_size, config.n_embd),
             }),
             modify.Add(),
+            nn.Dropout(config.dropout),
             *[Block(config) for _ in range(config.n_layer)],
-            modify.Sequential([
-                modify.LayerNorm(config.n_embd),
-                modify.ElementwiseAffine(config.n_embd, bias=config.bias),
-            ]),
+            nn.LayerNorm(config.n_embd, bias=config.bias),
             nn.Linear(config.n_embd, config.vocab_size, bias=False)
         ])
 
