@@ -11,16 +11,17 @@ import math
 import inspect
 from dataclasses import dataclass
 
-import modify
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-class SDPA(nn.Module):
+import modify
+from modify import _ModifyModule
+
+class SDPA(_ModifyModule):
     def __init__(self, config):
         super().__init__()
         self.n_head = config.n_head
-        self.dropout = config.dropout
 
     def forward(self, kqv):
         k, q, v = kqv
@@ -28,7 +29,7 @@ class SDPA(nn.Module):
         k = k.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
         q = q.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
         v = v.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)
         return y.transpose(1, 2).contiguous().view(B, T, n_embd) # re-assemble all head outputs side by side
 
 def CausalSelfAttention(config):
@@ -45,7 +46,6 @@ def MLP(config):
         'c_fc': nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias),   #B, T, 4*n_embd
         'gelu': nn.GELU(),                                                       #B, T, 4*n_embd
         'c_proj': nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias), #B, T, n_embd
-        'dropout': nn.Dropout(config.dropout),
     })
 
 def Residual(modules):
@@ -85,7 +85,6 @@ class ModifyGPT(nn.Module):
                 'wpe': nn.Embedding(config.block_size, config.n_embd),
             }),
             modify.Add(),
-            nn.Dropout(config.dropout),
             *[Block(config) for _ in range(config.n_layer)],
             modify.Sequential([
                 modify.LayerNorm(config.n_embd),

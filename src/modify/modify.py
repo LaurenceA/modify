@@ -33,7 +33,7 @@ class ModifyModuleGroup(_ModifyModule):
 
         for mod in self.mods.values():
             if not isinstance(mod, ModifyModule):
-                warn("Module not recognised (not a subtype of ModifyModule). If you're trying to use a batchnorm module, you need to use the modify wrapper (e.g. torch.nn.BatchNorm1d -> modify.BatchNorm1d), which gives a parameter-free batchnorm. Use an explicit modify.Affine layer afterwards if you want that.")
+                raise Exception(f"Module {type(mod)} not recognised (not a subtype of ModifyModule). If you're trying to use a batchnorm module, you need to use the modify wrapper (e.g. torch.nn.BatchNorm1d -> modify.BatchNorm1d), which gives a parameter-free batchnorm. Use an explicit modify.Affine layer afterwards if you want that.")
 
         self.module_list = nn.ModuleList(self.mods.values())
 
@@ -619,7 +619,8 @@ TorchLearnedLinear = (
     nn.Conv3d, 
     nn.ConvTranspose1d, 
     nn.ConvTranspose2d, 
-    nn.ConvTranspose3d
+    nn.ConvTranspose3d,
+    nn.Embedding,
 )
 
 TorchActivations = (
