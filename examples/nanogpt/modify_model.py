@@ -11,11 +11,10 @@ import math
 import inspect
 from dataclasses import dataclass
 
+import modify
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
-import modify
 
 class SDPA(nn.Module):
     def __init__(self, config):
@@ -29,7 +28,7 @@ class SDPA(nn.Module):
         k = k.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
         q = q.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
         v = v.view(B, T, self.n_head, n_embd // self.n_head).transpose(1, 2) # (B, nh, T, C)
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True, dropout_p=self.dropout if self.training else 0)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         return y.transpose(1, 2).contiguous().view(B, T, n_embd) # re-assemble all head outputs side by side
 
 def CausalSelfAttention(config):
@@ -39,7 +38,6 @@ def CausalSelfAttention(config):
         modify.UnBind(dim=-2),                                  #(B, T, n_embd),(B, T, n_embd), (B, T, n_embd)
         SDPA(config),                                           #B, T, n_embd
         nn.Linear(config.n_embd, config.n_embd, bias=config.bias),
-        nn.Dropout(config.dropout),
     ])
 
 def MLP(config):
