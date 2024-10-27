@@ -261,6 +261,37 @@ class ViewUnMerge(nn.Module):
 
         return x.view(*x.shape[:dim], self.n0, self.n1, *x.shape[(dim+1):])
 
+#########################
+#### Classes for KLD ####
+#########################
+
+class ElementwiseAffine(nn.Module):
+    """
+    Standard normalization layers combine a parameter-free normalization and
+    affine (i.e. bias + scale of the output). Dealing with these together for
+    KLD is quite painful.  So you should use elementwise_affine=False, and 
+    include an ElementwiseAffine layer afterwards.
+    """
+    def __init__(self, features, bias=True):
+        self.scale = nn.Parameter(t.ones(features))
+        self.bias = nn.Parameter(t.ones(features)) if bias else None
+
+    def forward(self, x):
+        return (self.scale * x) + self.bias
+
+class PointwiseNonlin(nn.Module):
+    """
+    Captures the number of features in a nonlinearity, so KLD can learn a separate
+    linear approximation to each feature.
+    """
+    def __init__(self, mod_or_func, features):
+        self.mod_or_func = mod_or_func
+        self.features = features
+
+    def forward(self, x):
+        assert x.shape[-1] == self.features
+        return self.mod_or_func(x)
+
 #############################
 #### Reshaping functions ####
 #############################
