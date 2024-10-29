@@ -57,9 +57,9 @@ class Pointwise(NoParamModule):
     def _forward(self, Gamma):
         return (Gamma*a)*s
 
-class ElementWiseAffine()
+class ElementwiseAffine()
     """
-    ElementWiseAffine corresponds to a bias + scale (e.g. after LayerNorm).
+    ElementwiseAffine corresponds to a bias + scale (e.g. after LayerNorm).
     Of course, we do have gradients for the bias + scale parameters, but
     they're not very useful for predicting future gradients because they're
     low-dimensional (just features, as opposed to in_features x out_features
@@ -70,7 +70,7 @@ class ElementWiseAffine()
     Gamma.
     """
     def __init__(self, mod):
-        assert isinstance(mod, modify.ElementWiseAffine)
+        assert isinstance(mod, modify.ElementwiseAffine)
         self.mod = [mod]
 
     def inv_chol_vec(self, Gamma, g):
