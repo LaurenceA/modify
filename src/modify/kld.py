@@ -108,6 +108,9 @@ class NoParamModule(nn.Module):
         self.check_inputs(gamma_in, module_inputs)
         return (self._forward(gamma_in), {})
 
+    def log_det_inv_chol(self):
+        return None
+
 def prod_none(*xs):
     """
     returns None if either of the inputs is None.
@@ -301,6 +304,9 @@ class Linear(nn.Module):
         self._invL = PositiveTriangular(self.out_features,     upper=False)
         self._invU = PositiveTriangular(self.in_features_bias, upper=True)
 
+    def log_det_inv_chol(self):
+        return self.in_features_bias * self._invL.logdet() + self.in_features_bias * self._invL.logdet()
+
     @property
     def invL(self):
         """
@@ -436,6 +442,12 @@ class ElementwiseAffine():
 
         self.s = nn.Parameter(torch.ones(self.features, 1))
 
+    def log_det_inv_chol(self):
+        result = self.log_inv_std_weight.sum()
+            if self.bias is not None:
+                result = result + self.log_inv_std_bias.sum()
+        return result
+
     def pred_grad_weight(self, gamma_in):
         if gamma_in.G is not None:
             return self.s*gamma_in.G.diagonal()
@@ -547,5 +559,89 @@ def kldify(mod):
         return kld_modules[type(mod)](mod)
     else:
         raise Exception(f"KLD doesn't know how to handle {type(mod)}")
-        
-        
+
+def grad2dict(mod):
+    """
+    Takes a model with gradients on the parameters, and converts to a nested dict.
+    """
+    result = {}
+    if isinstance(mod, modify.ModuleGroup):
+        for (k, m) in mod.mods.items():
+            result[k] = grad_dict(m)
+    else:
+        for (k, v) in mod.named_parameters():
+            assert v.grad is not None
+            result[k] = v.grad
+    return result
+
+def dict2grad(grad_dict, mod):
+    """
+    Takes a model with gradients on the parameters, and converts to a nested dict.
+    """
+    assert isinstance(mod, dict)
+
+    if isinstance(mod, modify.ModuleGroup):
+        for (k, m) in mod.mods.items():
+            dict2grad(m, grad_dict[k])
+    else:
+        for (k, v) in mod.named_parameters():
+            v.grad = grad_dict[k]
+
+def map_dict(f, d):
+    result = {}
+    for k, v in result.items():
+        if isinstance(v, dict):
+            result[k] = map_dict(f, v)
+        else:
+            result[k] = f(v)
+    return result
+
+def square_sum(d):
+    total = None
+    for v in d.values():
+        if isinstance(v, dict):
+            new_term = square_sum(v)
+        else:
+            assert isinstance(v, torch.Tensor)
+            new_term = v.square().sum()
+
+        total = (total + new_term) if (total is not None) else new_term
+    return total
+
+def log_det_inv_chol(mod):
+    """
+    Returns the log |chol^{-1}(cov)}|
+    """
+    if isinstance(mod, modify.ModuleGroup):
+        total = None
+        for mod in mod.mods.values():
+            new_term = log_det_inv_chol(mod)
+            if new_term is non None:
+                total = (total + new_term) if (total is not None) else new_term
+        return total
+    else:
+        return mod.log_det_inv_chol()
+
+def grad_model_obj(model, grad_model):
+    """
+    Computes log probability of a multivariate Gaussian distribution over the gradients.
+    """
+    grad_dict = grad2dict(model)
+    noise_dict = grad_model.inv_chol_vec(grad_dict)
+    return -0.5*square_sum(noise_dict) + log_det_inv_chol(grad_mod)
+    
+def natural_grad(model, grad_model):
+    """
+    Applies a natural gradient update using the gradient model.
+    """
+    #Extract .grad from the model parameters and puts them in a dict
+    grad_dict = grad2dict(model)
+
+    #noise_values = xi = L^{-1} grad
+    noise_dict, vjp_fn = torch.func.vjp(grad_model.inv_chol_vec, grad_dict)
+
+    #Computes natgrad = L^{-T} xi = L^{-T} L^{-1} grad
+    natgrad_dict = vjp_fn(noise_dict)
+
+    #Puts the natural gradient updates back into .grad, ready to be used with a standard optimizer.
+    dict2grad(natgrad_dict, model)
