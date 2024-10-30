@@ -63,7 +63,7 @@ def repr_lines(mod, name="", prefix=""):
     lines = []
     if name:
         name = '"' + name + '": '
-    if isinstance(mod, ModifyModuleGroup):
+    if isinstance(mod, ModuleGroup):
         lines.append(prefix + name + mod.__class__.__name__ + '({')
         for child_name, child_module in mod.mods.items():
             lines = lines + repr_lines(child_module, name=child_name, prefix=prefix + '  ')

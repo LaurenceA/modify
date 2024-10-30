@@ -1,5 +1,3 @@
-from types import NoneType
-
 import torch
 import torch.nn as nn
 
@@ -18,8 +16,8 @@ class Gamma():
     either G or g may be None.
     """
     def __init__(self, G, g):
-        assert isinstance(G, (torch.Tensor, NoneType))
-        assert isinstance(g, (torch.Tensor, NoneType))
+        assert isinstance(G, (torch.Tensor, type(None)))
+        assert isinstance(g, (torch.Tensor, type(None)))
 
         if G is not None:
             assert isinstance(G, torch.Tensor)
@@ -59,10 +57,10 @@ def validate_tuple_or_gamma(xs):
 
 class ModuleGroup(modify.ModuleGroup):
     def chol_vec(self, gamma_in, module_inputs):
-        return self.mat_vec_prod(gamma_in, module_inputs, 'chol_vec'):
+        return self.mat_vec_prod(gamma_in, module_inputs, 'chol_vec')
 
     def inv_chol_vec(self, gamma_in, module_inputs):
-        return self.mat_vec_prod(gamma_in, module_inputs, 'inv_chol_vec'):
+        return self.mat_vec_prod(gamma_in, module_inputs, 'inv_chol_vec')
 
 class Parallel(modify.ModuleGroup):
     def mat_vec_prod(self, gamma_ins, module_inputs, method):
@@ -98,10 +96,7 @@ class NoParamModule(nn.Module):
 
     This is an abstract class; concrete classes must override gamma_out.
     """
-    def __init__(self, mod):
-        super().__init__()
-
-    def check_inputs(self, Gamma, module_inputs)
+    def check_inputs(self, Gamma, module_inputs):
         assert isinstance(Gamma, torch.tensor)
         assert isinstance(module_inputs, dict) and (0==len(module_inputs))
 
@@ -121,7 +116,7 @@ def prod_none(*xs):
         return None
     else:
         total = xs[0]
-        for x in xs[1:]
+        for x in xs[1:]:
             total = total * x
         return total
 
@@ -140,17 +135,17 @@ def sum_none(*xs):
         return None
     else:
         total = non_none_xs[0]
-        for x in non_none_xs[1:]
+        for x in non_none_xs[1:]:
             total = total + x
         return total
 
-class Pointwise(NoParamModule):
+class ElementwiseNonlin(NoParamModule):
     def __init__(self, mod):
         super().__init__()
-        assert isinstance(mod, pointwise_nonlin)
-        self.a = nn.Parameter(t.ones(mod.features))
-        self.b = nn.Parameter(t.zeros(mod.features))
-        self.s = nn.Parameter(t.ones(mod.features, 1))
+        assert isinstance(mod, modify.ElementwiseNonlin)
+        self.a = nn.Parameter(torch.ones(mod.features))
+        self.b = nn.Parameter(torch.zeros(mod.features))
+        self.s = nn.Parameter(torch.ones(mod.features, 1))
 
     def gamma_out(self, gamma_in):
         G = mul_none(
@@ -168,7 +163,7 @@ class SPDA(NoParamModule):
     def __init__(self, mod):
         super().__init__()
 
-    def gamma_out(self, gamma_ins)
+    def gamma_out(self, gamma_ins):
         validate_tuple(gamma_ins)
         #Just return gammas from the values.
         return gamma_in[2]
@@ -184,20 +179,20 @@ class Copy(NoParamModule):
 class Add(NoParamModule):
     def __init__(self, mod):
         super().__init__()
-        self.omega1_G = nn.Parameter(0.5*t.ones(()))
-        self.omega2_G = nn.Parameter(0.5*t.ones(()))
-        self.omega1_g = nn.Parameter(0.5*t.ones(()))
-        self.omega2_g = nn.Parameter(0.5*t.ones(()))
+        self.omega1_G = nn.Parameter(0.5*torch.ones(()))
+        self.omega2_G = nn.Parameter(0.5*torch.ones(()))
+        self.omega1_g = nn.Parameter(0.5*torch.ones(()))
+        self.omega2_g = nn.Parameter(0.5*torch.ones(()))
 
     def gamma_out(self, gamma_ins):
         assert 2 == len(gamma_ins)
         G = sum_none(
-            prod_none(self.omega1_G, gamma_ins[0].G)
-            prod_none(self.omega2_G, gamma_ins[1].G)
+            prod_none(self.omega1_G, gamma_ins[0].G),
+            prod_none(self.omega2_G, gamma_ins[1].G),
         )
         g = sum_none(
-            prod_none(self.omega1_g, gamma_ins[0].g)
-            prod_none(self.omega2_g, gamma_ins[1].g)
+            prod_none(self.omega1_g, gamma_ins[0].g),
+            prod_none(self.omega2_g, gamma_ins[1].g),
         )
         
         return Gammas(G, g)
@@ -205,23 +200,23 @@ class Add(NoParamModule):
 class Mul(NoParamModule):
     def __init__(self, mod):
         super().__init__()
-        self.s0 = nn.Parameter(t.ones((mod.features, 1)))
-        self.s1 = nn.Parameter(t.ones((mod.features, 1)))
-        self.a0 = nn.Parameter(t.ones(mod.features))
-        self.a1 = nn.Parameter(t.ones(mod.features))
-        self.b  = nn.Parameter(t.zeros(mod.features))
+        self.s0 = nn.Parameter(torch.ones((mod.features, 1)))
+        self.s1 = nn.Parameter(torch.ones((mod.features, 1)))
+        self.a0 = nn.Parameter(torch.ones(mod.features))
+        self.a1 = nn.Parameter(torch.ones(mod.features))
+        self.b  = nn.Parameter(torch.zeros(mod.features))
 
     def gamma_out(self, gamma_ins):
         assert 2 == len(gamma_ins)
         g = sum_none(
-            prod_none(self.s0, gamma_ins[0].g)
-            prod_none(self.s1, gamma_ins[1].g)
+            prod_none(self.s0, gamma_ins[0].g),
+            prod_none(self.s1, gamma_ins[1].g),
         )
         G = sum_none(
-            prod_none(gamma_ins[0].G, self.s0, self.a0)
-            prod_none(gamma_ins[1].G, self.s1, self.a1)
-            prod_none(gamma_ins[0].g, self.s0, self.b)
-            prod_none(gamma_ins[1].g, self.s1, self.b)
+            prod_none(gamma_ins[0].G, self.s0, self.a0),
+            prod_none(gamma_ins[1].G, self.s1, self.a1),
+            prod_none(gamma_ins[0].g, self.s0, self.b),
+            prod_none(gamma_ins[1].g, self.s1, self.b),
         )
         
         return Gammas(G, g)
@@ -241,8 +236,8 @@ class MeanSub(NoParamModule):
 
 class RMSNorm(NoParamModule):
     def __init__(self, mod):
-        self.log_eps  = nn.Parameter(-10 * t.ones(()))
-        self.xb = nn.Parameter(t.randn(mod.normalized_shape[-1], 1))
+        self.log_eps  = nn.Parameter(-10 * torch.ones(()))
+        self.xb = nn.Parameter(torch.randn(mod.normalized_shape[-1], 1))
 
     def gamma_out(self, gamma_in):
         xb = self.xb
@@ -250,7 +245,7 @@ class RMSNorm(NoParamModule):
 
         g = gamma_in.g
         if g is not None:
-            g = t.sqrt(norm) * (g - xb @ ((xb.mT @ g) / norm))
+            g = torch.sqrt(norm) * (g - xb @ ((xb.mT @ g) / norm))
 
         G = gamma_in.G
         if G is not None:
@@ -270,8 +265,8 @@ class PositiveTriangular(nn.Module):
     """
     def __init__(self, features, upper):
         super().__init__()
-        self.A = nn.Parameter(t.zeros(features, features))
-        self.log_diag = nn.Parameter(t.zeros(features))
+        self.A = nn.Parameter(torch.zeros(features, features))
+        self.log_diag = nn.Parameter(torch.zeros(features))
 
     def forward(self):
         if upper:
@@ -303,8 +298,8 @@ class Linear(nn.Module):
         self.inv_weight_T = nn.Parameter(torch.zeros(mod.weight.shape)) # out_features x in_features
 
         #Inverse of the Kronecker factored Cholesky; do the trick of treating the bias as an extra feature.
-        self._invL = PositiveTriangular(out_features,     upper=False)
-        self._invU = PositiveTriangular(in_features_bias, upper=True)
+        self._invL = PositiveTriangular(self.out_features,     upper=False)
+        self._invU = PositiveTriangular(self.in_features_bias, upper=True)
 
     @property
     def invL(self):
@@ -366,16 +361,16 @@ class Linear(nn.Module):
         pred_grad = self.pred_weight_grad(self, gamma_in) # out_features x in_features
 
         if self.bias is not None:
-            grad_bias = grad_module_inputs['bias'])              # out_features x 1
+            grad_bias = grad_module_inputs['bias']               # out_features x 1
             pred_grad_bias = self.pred_bias_grad(self, gamma_in) # out_features x 1
-            grad      = t.cat((     grad,      grad_bias), -1)   # out_features x in_features+1
-            pred_grad = t.cat((pred_grad, pred_grad_bias), -1)   # out_features x in_features+1
+            grad      = torch.cat((     grad,      grad_bias), -1)   # out_features x in_features+1
+            pred_grad = torch.cat((pred_grad, pred_grad_bias), -1)   # out_features x in_features+1
 
         corr_noise = grad - pred_grad             # out_features x in_features+1?
         iid_noise  = self.L @ corr_noise @ self.U # out_features x in_features+1?
 
         if self.bias is not None:
-            noise_module_outputs = {'bias': iid_noise[:, -1:], 'weight', iid_noise[:, :-1]}
+            noise_module_outputs = {'bias': iid_noise[:, -1:], 'weight': iid_noise[:, :-1]}
         else:
             noise_module_outputs = {'weight': iid_noise}
 
@@ -391,29 +386,29 @@ class Linear(nn.Module):
         pred_grad = self.pred_weight_grad(self, gamma_in) # out_features x in_features
 
         if self.bias is not None:
-            iid_noise_bias = noise_module_inputs['bias'])        # out_features x 1
+            iid_noise_bias = noise_module_inputs['bias']         # out_features x 1
             pred_grad_bias = self.pred_bias_grad(self, gamma_in) # out_features x 1
-            iid_noise = t.cat(( iid_noise,  iid_noise_bias), -1) # out_features x in_features+1
-            pred_grad = t.cat((pred_noise, pred_noise_bias), -1) # out_features x in_features+1
+            iid_noise = torch.cat(( iid_noise,  iid_noise_bias), -1) # out_features x in_features+1
+            pred_grad = torch.cat((pred_noise, pred_noise_bias), -1) # out_features x in_features+1
 
         #Computes:
         #corr_noise = L^{-1} @ corr_noise @ U^{-1}
-        corr_noise = t.linalg.solve_triangular(
+        corr_noise = torch.linalg.solve_triangular(
             self.L, 
-            t.linalg.solve_triangular(self.U, iid_noise, upper=True, left=False)
-            upper=False
+            torch.linalg.solve_triangular(self.U, iid_noise, upper=True, left=False),
+            upper=False,
         )                             # out_features x in_features+1?
         grad = corr_noise + pred_grad # out_features x in_features+1?
 
         if self.bias is not None:
-            grad_module_outputs = {'bias': grad[:, -1:], 'weight', grad[:, :-1]}
+            grad_module_outputs = {'bias': grad[:, -1:], 'weight': grad[:, :-1]}
         else:
             grad_module_outputs = {'weight': grad}
 
         return (self.gamma_out(gamma_in, grad_module_outputs), grad_module_outputs)
     
 
-class ElementwiseAffine()
+class ElementwiseAffine():
     """
     ElementwiseAffine corresponds to a bias + scale (e.g. after LayerNorm).
     Of course, we do have gradients for the bias + scale parameters, but
@@ -433,13 +428,13 @@ class ElementwiseAffine()
         self.features = self.a.shape[0]
         assert self.a.shape == (features,)
 
-        self.log_inv_std_weight = nn.Parameter(t.ones(features))
+        self.log_inv_std_weight = nn.Parameter(torch.ones(features))
 
         if self.bias is not None:
             assert self.bias.shape == (features,)
-            self.log_inv_std_bias = nn.Parameter(t.ones(features))
+            self.log_inv_std_bias = nn.Parameter(torch.ones(features))
 
-        self.s = nn.Parameter(t.ones(self.features, 1))
+        self.s = nn.Parameter(torch.ones(self.features, 1))
 
     def pred_grad_weight(self, gamma_in):
         if gamma_in.G is not None:
@@ -536,18 +531,18 @@ kld_module_group = {
 }
 kld_modules = {
     modify.ElementwiseNonlin: ElementwiseNonlin,
-    modify.Linear: Linear,
+    nn.Linear: Linear,
     modify.ElementwiseAffine: ElementwiseAffine,
     modify.Copy: Copy,
     modify.Add: Add,
     modify.Mul: Mul,
     nn.RMSNorm: rms_norm,
-    nn.LayerNorm: layer_Norm,
+    nn.LayerNorm: layer_norm,
 }
 
 def kldify(mod):
     if isinstance(mod, modify.ModuleGroup):
-        return kld_module_group[type(mod)]({k: kldify(v) for (k, v) in mod.mods})
+        return kld_module_group[type(mod)]({k: kldify(v) for (k, v) in mod.mods.items()})
     elif type(mod) in kld_modules:
         return kld_modules[type(mod)](mod)
     else:
