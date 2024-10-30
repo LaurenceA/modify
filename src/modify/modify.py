@@ -191,20 +191,24 @@ class Copy(nn.Module):
         return self.number_of_copies * (x,)
 
 class Add(nn.Module):
+    def __init__(self, features):
+        super().__init__()
+        self.features = features
+
     def forward(self, xs):
         assert isinstance(xs, tuple)
-        total = xs[0]
-        for x in xs[1:]:
-            total = total + x
-        return total
+        assert len(xs)==2
+        return xs[0] + xs[1]
 
 class Mul(nn.Module):
+    def __init__(self, features):
+        super().__init__()
+        self.features = features
+
     def forward(self, xs):
         assert isinstance(xs, tuple)
-        total = xs[0]
-        for x in xs[1:]:
-            total = total * x
-        return total
+        assert len(xs)==2
+        return xs[0] * xs[1]
 
 class ViewMerge(nn.Module):
     def __init__(self, dim0, dim1):
@@ -279,12 +283,13 @@ class ElementwiseAffine(nn.Module):
     def forward(self, x):
         return (self.scale * x) + self.bias
 
-class PointwiseNonlin(nn.Module):
+class ElementwiseNonlin(nn.Module):
     """
     Captures the number of features in a nonlinearity, so KLD can learn a separate
     linear approximation to each feature.
     """
     def __init__(self, mod_or_func, features):
+        super().__init__()
         self.mod_or_func = mod_or_func
         self.features = features
 

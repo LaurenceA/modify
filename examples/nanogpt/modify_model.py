@@ -42,28 +42,28 @@ def CausalSelfAttention(config):
 
 def MLP(config):
     return modify.Sequential({
-        'c_fc': nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias),   #B, T, 4*n_embd
-        'gelu': nn.GELU(),                                                       #B, T, 4*n_embd
+        'c_fc': nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias), #B, T, 4*n_embd
+        'gelu': modify.ElementwiseNonlin(nn.GELU(),config.n_embd*4), #B, T, 4*n_embd
         'c_proj': nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias), #B, T, n_embd
         'dropout': nn.Dropout(config.dropout),
     })
 
-def Residual(modules):
+def Residual(config, modules):
     return modify.Sequential([
         modify.Copy(2),
         modify.Parallel([
             nn.Identity(),
             modules,
         ]),
-        modify.Add(),
+        modify.Add(config.n_embd),
     ])
 
 def Block(config):
-    r1 = Residual(modify.Sequential([
+    r1 = Residual(config, modify.Sequential([
         nn.LayerNorm(config.n_embd, bias=config.bias),
         CausalSelfAttention(config),
     ]))
-    r2 = Residual(modify.Sequential([
+    r2 = Residual(config, modify.Sequential([
         nn.LayerNorm(config.n_embd, bias=config.bias),
         MLP(config),
     ]))
@@ -82,7 +82,7 @@ class ModifyGPT(nn.Module):
                 'wte': nn.Embedding(config.vocab_size, config.n_embd),
                 'wpe': nn.Embedding(config.block_size, config.n_embd),
             }),
-            modify.Add(),
+            modify.Add(config.n_embd),
             nn.Dropout(config.dropout),
             *[Block(config) for _ in range(config.n_layer)],
             nn.LayerNorm(config.n_embd, bias=config.bias),
