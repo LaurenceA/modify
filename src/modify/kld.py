@@ -57,6 +57,10 @@ def validate_tuple_or_gamma(xs):
 #################################
 
 class ModuleGroup(modify.ModuleGroup):
+    def __init__(self, mods, indep_across_layers):
+        self.indep_across_layers = indep_across_layers
+        
+
     def chol_vec(self, module_inputs):
         result, gamma_out = self.mat_vec_prod('_chol_vec', module_inputs, Gamma(None, None))
         return result
@@ -412,7 +416,7 @@ class Linear(nn.Module):
         """
         Converts IID noise into gradients from the gradient model.
         """
-        self.check(gamma_in, noise_module_inputs)
+        self.check(noise_module_inputs, gamma_in)
 
         iid_noise = noise_module_inputs['weight']   # out_features x in_features
         pred_grad = self.pred_weight_grad(gamma_in) # out_features x in_features or None
@@ -424,14 +428,14 @@ class Linear(nn.Module):
             pred_grad_bias = self.pred_bias_grad(gamma_in)           # out_features x 1 or None
             if pred_grad_bias is None:
                 pred_grad_bias = torch.zeros_like(iid_noise_bias)             # out_features x 1
-            iid_noise = torch.cat(( iid_noise,  iid_noise_bias), -1) # out_features x in_features+1
-            pred_grad = torch.cat((pred_noise, pred_noise_bias), -1) # out_features x in_features+1
+            iid_noise = torch.cat((iid_noise, iid_noise_bias), -1) # out_features x in_features+1
+            pred_grad = torch.cat((pred_grad, pred_grad_bias), -1) # out_features x in_features+1
 
         #Computes:
         #corr_noise = L^{-1} @ corr_noise @ U^{-1}
         corr_noise = torch.linalg.solve_triangular(
-            self.L, 
-            torch.linalg.solve_triangular(self.U, iid_noise, upper=True, left=False),
+            self.invL(), 
+            torch.linalg.solve_triangular(self.invU(), iid_noise, upper=True, left=False),
             upper=False,
         )                             # out_features x in_features+1?
         grad = corr_noise + pred_grad # out_features x in_features+1?
@@ -588,37 +592,65 @@ kld_modules = {
     nn.LayerNorm: layer_norm,
 }
 
-def kldify(mod):
+def kldify(mod, indep_across_layers=False):
     if isinstance(mod, modify.ModuleGroup):
-        return kld_module_group[type(mod)]({k: kldify(v) for (k, v) in mod.mods.items()})
+        return kld_module_group[type(mod)]({k: kldify(v, indep_across_layers) for (k, v) in mod.mods.items()})
     elif type(mod) in kld_modules:
-        return kld_modules[type(mod)](mod)
+        return kld_modules[type(mod)](mod, indep_across_layers)
     else:
         raise Exception(f"KLD doesn't know how to handle {type(mod)}")
+
+def param2dict(f, mod):
+    """
+    Applies a function, f, to every parameter, and returns a nested dict of the results.
+    """
+    result = {}
+    if isinstance(mod, modify.ModuleGroup):
+        for (k, m) in mod.mods.items():
+            result[k] = param2dict(f, m)
+    else:
+        for (k, v) in mod.named_parameters():
+            result[k] = f(v)
+    return result
 
 def grad2dict(mod):
     """
     Takes a model with gradients on the parameters, and converts to a nested dict.
     """
-    result = {}
-    if isinstance(mod, modify.ModuleGroup):
-        for (k, m) in mod.mods.items():
-            result[k] = grad2dict(m)
-    else:
-        for (k, v) in mod.named_parameters():
-            assert v.grad is not None
-            result[k] = v.grad
-    return result
+    def f(v):
+        assert v.grad is not None
+        return v.grad
+
+    return param2dict(f, mod)
+    #result = {}
+    #if isinstance(mod, modify.ModuleGroup):
+    #    for (k, m) in mod.mods.items():
+    #        result[k] = grad2dict(m)
+    #else:
+    #    for (k, v) in mod.named_parameters():
+    #        assert v.grad is not None
+    #        result[k] = v.grad
+    #return result
+
+def noise_dict(mod):
+    """
+    Takes a model without gradients on the parameters, and returns a nested dict with IID
+    noise the same shape as the parameters
+    """
+    return param2dict(lambda v: torch.randn_like(v), mod)
+
+def rms_grad(mod):
+    return param2dict(lambda v: v.grad.square().mean().sqrt().item(), mod)
 
 def dict2grad(grad_dict, mod):
     """
     Takes a model with gradients on the parameters, and converts to a nested dict.
     """
-    assert isinstance(mod, dict)
+    assert isinstance(grad_dict, dict)
 
     if isinstance(mod, modify.ModuleGroup):
         for (k, m) in mod.mods.items():
-            dict2grad(m, grad_dict[k])
+            dict2grad(grad_dict[k], m)
     else:
         for (k, v) in mod.named_parameters():
             v.grad = grad_dict[k]
@@ -656,7 +688,19 @@ def natural_grad(model, grad_model):
     noise_dict, vjp_fn = torch.func.vjp(grad_model.inv_chol_vec, grad_dict)
 
     #Computes natgrad = L^{-T} xi = L^{-T} L^{-1} grad
-    natgrad_dict = vjp_fn(noise_dict)
+    natgrad_dict = vjp_fn(noise_dict)[0] #[0] is for the outer tuple.
 
     #Puts the natural gradient updates back into .grad, ready to be used with a standard optimizer.
     dict2grad(natgrad_dict, model)
+
+def sample_grad_model(model, grad_model):
+    """
+    Samples some gradients that should look like gradients from the real model
+    with sampled data.
+    """
+    iid_noise_dict = noise_dict(model)
+
+    grad_dict = grad_model.chol_vec(iid_noise_dict)
+
+    #Puts the natural gradient updates back into .grad, ready to be used with a standard optimizer.
+    dict2grad(grad_dict, model)
