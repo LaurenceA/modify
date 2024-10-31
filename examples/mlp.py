@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader
 import modify
 import modify.kld as kld
 
+torch.manual_seed(0)
+
 in_features = 28*28
 hidden_features = 100
 out_features = 10
@@ -38,8 +40,10 @@ test_loader = DataLoader(test_dataset, batch_size=1000)
 # Initialize model, loss function and optimizer
 device = torch.device('mps')
 model = model.to(device)
+grad_model = grad_model.to(device)
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+model_opt      = torch.optim.Adam(model.parameters(),      lr=0.001)
+grad_model_opt = torch.optim.Adam(grad_model.parameters(), lr=0.001)
 
 # Training loop
 def train(epochs):
@@ -47,14 +51,21 @@ def train(epochs):
         model.train()
         for batch_idx, (image, target) in enumerate(train_loader):
             image, target = image.view(-1, 28*28).to(device), target.to(device)
-            optimizer.zero_grad()
+            model_opt.zero_grad()
+            grad_model_opt.zero_grad()
+
             output = model(image)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
+            model_loss = criterion(output, target)
+            model_loss.backward()
+
+            grad_model_loss = kld.grad_model_loss(model, grad_model) 
+            grad_model_loss.backward()
+
+            grad_model_opt.step()
+            model_opt.step()
             
             if batch_idx % 100 == 0:
-                print(f'Epoch: {epoch}, Batch: {batch_idx}, Loss: {loss.item():.4f}')
+                print(f'Epoch: {epoch}, Batch: {batch_idx}, Model loss: {model_loss.item():.4f}, Grad Model loss: {grad_model_loss.item():.4f}')
 
 # Evaluation function
 def test():
