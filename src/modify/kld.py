@@ -57,10 +57,6 @@ def validate_tuple_or_gamma(xs):
 #################################
 
 class ModuleGroup(modify.ModuleGroup):
-    def __init__(self, mods, indep_across_layers):
-        self.indep_across_layers = indep_across_layers
-        
-
     def chol_vec(self, module_inputs):
         result, gamma_out = self.mat_vec_prod('_chol_vec', module_inputs, Gamma(None, None))
         return result
@@ -169,7 +165,7 @@ def sum_none(*xs):
         return total
 
 class ElementwiseNonlin(NoParamModule):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         super().__init__()
         assert isinstance(mod, modify.ElementwiseNonlin)
         self.a = nn.Parameter(torch.ones(mod.features))
@@ -189,7 +185,7 @@ class ElementwiseNonlin(NoParamModule):
         
 
 class SPDA(NoParamModule):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         super().__init__()
 
     def gamma_out(self, gamma_ins):
@@ -198,7 +194,7 @@ class SPDA(NoParamModule):
         return gamma_in[2]
 
 class Copy(NoParamModule):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         super().__init__()
         self.number_of_copies = mod.number_of_copies
 
@@ -206,7 +202,7 @@ class Copy(NoParamModule):
         return self.number_of_copies * (gamma_in,)
 
 class Add(NoParamModule):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         super().__init__()
         self.omega1_G = nn.Parameter(0.5*torch.ones(()))
         self.omega2_G = nn.Parameter(0.5*torch.ones(()))
@@ -227,7 +223,7 @@ class Add(NoParamModule):
         return Gamma(G, g)
 
 class Mul(NoParamModule):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         super().__init__()
         self.s0 = nn.Parameter(torch.ones((mod.features, 1)))
         self.s1 = nn.Parameter(torch.ones((mod.features, 1)))
@@ -251,7 +247,7 @@ class Mul(NoParamModule):
         return Gamma(G, g)
 
 class MeanSub(NoParamModule):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         super().__init__()
 
     def gamma_out(self, gamma_in):
@@ -267,7 +263,7 @@ class MeanSub(NoParamModule):
         return Gamma(G, g)
 
 class RMSNorm(NoParamModule):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         self.log_eps  = nn.Parameter(-10 * torch.ones(()))
         self.xb = nn.Parameter(torch.randn(mod.normalized_shape[-1], 1))
 
@@ -317,9 +313,10 @@ class PositiveTriangular(nn.Module):
 
 
 class Linear(nn.Module):
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
         super().__init__()
         assert isinstance(mod, nn.Linear)
+        self.indep_across_layers = indep_across_layers
 
         #Save weight matrix and bias vector for the underlying linear module.
         #The .data takes mod.weight, which is an nn.Parameter and returns the underlying Tensor.
@@ -350,12 +347,18 @@ class Linear(nn.Module):
     def pred_weight_grad(self, gamma_in):
         #gamma.G         is  in_features x in_features
         #self.weight_inv is out_features x in_features
-        return matmul_none(self.inv_weight_T, gamma_in.G) # out_features x in_features.
+        if self.indep_across_layers:
+            return None
+        else:
+            return matmul_none(self.inv_weight_T, gamma_in.G) # out_features x in_features.
 
     def pred_bias_grad(self, gamma_in):
         #gamma.g         is  in_features x 1
         #self.weight_inv is out_features x in_features
-        return matmul_none(self.inv_weight_T, gamma_in.g) # out_features x 1.
+        if self.indep_across_layers:
+            return None
+        else:
+            return matmul_none(self.inv_weight_T, gamma_in.g) # out_features x 1.
 
     def check(self, module_inputs, gamma_in):
         assert isinstance(gamma_in, Gamma)
@@ -460,7 +463,9 @@ class ElementwiseAffine():
     but we don't bother to use the gradients of bias + scale to update output
     Gamma.
     """
-    def __init__(self, mod):
+    def __init__(self, mod, indep_across_layers):
+        super().__init__()
+        self.indep_across_layers = indep_across_layers
         assert isinstance(mod, modify.ElementwiseAffine)
 
         #Save weight matrix and bias vector for the underlying linear module.
@@ -487,13 +492,16 @@ class ElementwiseAffine():
         return result
 
     def pred_weight_grad(self, gamma_in):
-        if gamma_in.G is not None:
+        if gamma_in.G is not None and not self.indep_across_layers:
             return self.s*gamma_in.G.diagonal()
         else:
             None
 
     def pred_bias_grad(self, gamma_in):
-        return mul_none(self.s, gamma_in.g)
+        if not self.indep_across_layers:
+            return mul_none(self.s, gamma_in.g)
+        else:
+            return None
 
     def check(self, gamma_in, module_inputs):
         assert isinstance(gamma_in, Gamma)
