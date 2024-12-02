@@ -3,6 +3,10 @@ import torch.nn as nn
 
 import modify
 
+default_beta = 0.1
+default_eps = 0.1
+default_tensor_kwargs = {}
+
 #################################################
 #### Changed argument order for mat_vec_prod ####
 #################################################
@@ -30,50 +34,28 @@ def gamma_true(grad, x):
 
     return Gamma(G, g)
 
-class Gamma():
-    """
-    G is a matrix, \Gamma = <dL/dx x^T>
-    g is a vector, \gamma = <dL/dx>
-    G.shape = [dim, dim]
-    g.shape = [dim, 1]
-    either G or g may be None.
-    """
-    def __init__(self, G, g):
-        assert isinstance(G, (torch.Tensor, type(None)))
-        assert isinstance(g, (torch.Tensor, type(None)))
-
+class AbstractGamma(): pass
+    def __init__(self, G):
+        assert isinstance(G, (type(None), torch.Tensor))
         if G is not None:
-            assert isinstance(G, torch.Tensor)
             assert 2 == G.ndim
             assert G.shape[0] == G.shape[1]
 
-        if g is not None:
-            assert isinstance(g, torch.Tensor)
-            assert 2 == g.ndim
-            assert 1 == g.shape[1]
-
-        if (G is not None) and (g is not None):
-            assert G.shape[0] == g.shape[0]
-
         self.G = G
-        self.g = g
+    
+class Gamma(AbstractGamma):
+    def passthrough(self):
+        return PassThroughGamma(self.G)
 
-    def check_shape(self, features):
-        assert self.G.shape == (features, features)
-        assert self.g.shape == (features, 1)
-
-def sum_none(*xs):
+class PassThroughGamma(AbstractGamma): pass
     """
-    Returns sum of all non-None inputs.  Returns None if all inputs are None.
+    Represents a Gamma that does not even attempt to approximate
+    Gamma for the current activations.  This will usually occur
+    because we have passed Gamma straight through e.g. a ReLU
+    without trying to e.g. linearise the ReLU.    
     """
-    non_none_xs = [x for x in xs if x is not None]
-    if 0 == len(non_none_xs):
-        return None
-    else:
-        total = non_none_xs[0]
-        for x in non_none_xs[1:]:
-            total = total + x
-        return total
+    def passthrough(self):
+        return self
 
 
 def validate_tuple(xs):
@@ -88,7 +70,7 @@ def validate_tuple_or_gamma(xs):
     """
     Checks that the input is a Gamma or a (nested) tuple of Gamma's.
     """
-    assert isinstance(xs, (tuple, Gamma))
+    assert isinstance(xs, (tuple, AbstractGamma))
     if isinstance(xs, tuple):
         for x in xs:
             validate_tuple_or_gamma(x)
@@ -106,18 +88,18 @@ class ModuleGroup():
       3. Calling e.g. wrapped_model.method(), where method = 
     """
     def chol_vec(self, module_inputs):
-        gamma_out, result = self.mat_vec_prod('_chol_vec', Gamma(None, None), module_inputs)
+        gamma_out, result = self.mat_vec_prod('_chol_vec', Gamma(None), module_inputs)
         return result
 
     def inv_chol_vec(self, module_inputs):
-        gamma_out, result = self.mat_vec_prod('_inv_chol_vec', Gamma(None, None), module_inputs)
+        gamma_out, result = self.mat_vec_prod('_inv_chol_vec', Gamma(None), module_inputs)
         return result
 
     def update(self):
-        self.propagate_gamma('_update', Gamma(None, None))
+        self.propagate_gamma('_update', Gamma(None))
 
     def init_gamma(self):
-        self.propagate_gamma('_init_gamma', Gamma(None, None))
+        self.propagate_gamma('_init_gamma', Gamma(None))
 
     def _chol_vec(self, gamma_in, module_inputs):
         return self.mat_vec_prod('_chol_vec', gamma_in, module_inputs)
@@ -171,76 +153,110 @@ class Sequential(ModuleGroup, modify.Sequential):
 #############################################
 
 class EMA(nn.Module):
-    def __init__(self, shape, beta, tensor_kwargs):
+    """
+    Lazily initialized EMA
+    """
+    def __init__(self, beta):
         self.beta = beta
-        self.register_buffer('ema', t.zeros(shape, **tensor_kwargs))
+        self.ema = None
 
     def update(self, x):
+        if self.ema is None:
+            self.register_buffer('ema', t.zeros_like(x))
+
         assert x.shape == self.ema.shape
+        assert x.device == self.ema.device
+        assert x.dtype == self.ema.dtype
         self.ema.mul_(self.beta).add_(x, 1-self.beta)
 
-class LinearRegression(nn.Module):
-    def updateT(self, X, Y):
-        self.update(X.mT, Y.mT)
+    def forward(self):
+        return self.ema
 
-    def applyT(self, X):
-        return self.apply(X.mT).mT
+class Buffer(nn.Module):
+    """
+    Lazily initialized Buffer
+    """
+    def __init__(self):
+        self.value = None
 
-class UnivariateLinearRegressionNoBias(LinearRegression):
+    def update(self, x):
+        if self.value is None:
+            self.register_buffer('value', x)
+        else:
+            assert x.shape == self.value.shape
+            assert x.device == self.value.device
+            assert x.dtype == self.value.dtype
+            self.value.copy_(x)
+
+    def forward(self):
+        return self.value
+
+
+class UnivariateLinearRegressionNoBias(nn.Module):
     """
-    Different learned coefficients for the last (feature) dimension.
-    Average over everything else.
+    This is univariate linear regression.  So for each regression
+    problem, there is one input feature, and one weight.  But, you 
+    solve many of these univariate problems in parallel.
+
+    Specifically, we have a different set of problems for each 
+    index in the feature dimension, which appears last in the inputs.
+
+    We treat the other dimensions as giving independent samples for 
+    those inference problems.
     """
-    def __init__(self, features, beta, eps, tensor_kwargs):
-        super().__init__()
-        self.features = features
+    def __init__(beta=default_beta, eps=default_eps):
         self.eps = eps
 
         #Buffers representing expectations of x^2, x*y
-        self.xx = EMA(features, beta, tensor_kwargs)
-        self.xy = EMA(features, beta, tensor_kwargs)
+        self.xx = EMA(beta)
+        self.xy = EMA(beta)
         #Learned weight
-        self.register_buffer('w',  t.zeros(in_features, **tensor_kwargs))
+        self.w = Buffer()
 
-    def update(self, X, Y):
-        assert x.shape[-1] == self.features
-        assert y.shape[-1] == self.features
-        x = x.view(-1, self.features)
-        y = y.view(-1, self.features)
+    def update(self, x, y):
+        assert x.shape[-1] = y.shape[-1]
+        features = x.shape[-1]
+        x = x.view(-1, features)
+        y = y.view(-1, features)
         assert x.shape[0] == y.shape[0]
 
         self.xx.update((x*x).mean(0))
         self.xy.update((x*y).mean(0))
-        self.w.copy_(self.xy.ema / (self.x2.ema + self.eps))
+        self.w.update(self.xy() / (self.x2() + self.eps))
 
-    def apply(self, x):
-        assert x.shape[-1] == self.features
-        return x * self.w
+    def forward(self, x):
+        return x * self.w()
 
-class UnivariateLinearRegressionWithBias(LinearRegression):
+class UnivariateLinearRegressionWithBias(nn.Module):
     """
-    Different learned coefficients for the last (feature) dimension.
-    Average over everything else.
+    This is univariate linear regression.  So for each regression
+    problem, there is one input feature, and one weight.  But, you 
+    solve many of these univariate problems in parallel.
+
+    Specifically, we have a different set of problems for each 
+    index in the feature dimension, which appears last in the inputs.
+
+    We treat the other dimensions as giving independent samples for 
+    those inference problems.
     """
-    def __init__(self, features, beta, eps, tensor_kwargs):
+    def __init__(self, beta=default_beta, eps=default_eps):
         super().__init__()
-        self.features = features
         self.eps = eps
 
         #Buffers representing expectations of x, y, x^2, x*y
-        self.x  = EMA(features, beta, tensor_kwargs)
-        self.y  = EMA(features, beta, tensor_kwargs)
-        self.xx = EMA(features, beta, tensor_kwargs)
-        self.xy = EMA(features, beta, tensor_kwargs)
+        self.x  = EMA(beta)
+        self.y  = EMA(beta)
+        self.xx = EMA(beta)
+        self.xy = EMA(beta)
         #Learned weight and bias
-        self.register_buffer('w',  t.zeros(features, **tensor_kwargs))
-        self.register_buffer('b',  t.zeros(features, **tensor_kwargs))
+        self.w = Buffer()
+        self.b = Buffer()
 
-    def update(self, X, Y):
-        assert x.shape[-1] == self.features
-        assert y.shape[-1] == self.features
-        x = x.view(-1, self.features)
-        y = y.view(-1, self.features)
+    def update(self, x, y):
+        assert x.shape[-1] = y.shape[-1]
+        features = x.shape[-1]
+        x = x.view(-1, features)
+        y = y.view(-1, features)
         assert x.shape[0] == y.shape[0]
 
         self.x.update(x.mean(0))
@@ -248,71 +264,143 @@ class UnivariateLinearRegressionWithBias(LinearRegression):
         self.xx.update((x*x).mean(0))
         self.xy.update((x*y).mean(0))
 
-        self.w.copy_((self.xy.ema - self.x.ema*self.y.ema) / (self.x2.ema - self.x.ema*self.x.ema + self.eps))
-        self.b.copy_(self.y.ema - self.a*self.x.ema)
+        self.w.copy_((self.xy() - self.x()*self.y()) / (self.xx() - self.x()*self.x() + self.eps))
+        self.b.copy_(self.y() - self.w()*self.x())
 
-    def apply(self, x):
+    def forward(self, x):
         assert x.shape[-1] == self.features
-        return x * self.w + self.b
+        return x * self.w() + self.b()
 
-class MultivariateLinearRegression(LinearRegression):
-    def __init__(self, in_features, out_features, copies, beta, eps, tensor_kwargs):
+class LinearRegressionR(nn.Module):
+    """
+    Multivariate linear regression.
+    Y = X @ WR
+    """
+    def __init__(self, beta=default_beta, eps=default_eps, tensor_kwargs=default_tensor_kwargs):
         super().__init__()
+
+        assert isinstance(in_features, int)
+        assert isinstance(out_features, int)
 
         self.in_features = in_features
         self.out_features = out_features
+        self.eps = eps
 
-        if copies is None:
-            self.copies = 1
-            self.unsqueeze = True #Adds an extra copy dimension to the inputs
-        else:
-            self.copies = copies
-            self.unsqueeze = False
-
-        self.XTX = EMA((copies, in_features, in_features),  beta, tensor_kwargs)
-        self.XTY = EMA((copies, in_features, out_features), beta, tensor_kwargs)
-        self.register_buffer('W', t.zeros(copies, in_features, out_features, tensor_kwargs))
+        self.XTX = EMA((in_features, in_features),  beta, tensor_kwargs)
+        self.XTY = EMA((in_features, out_features), beta, tensor_kwargs)
+        self.register_buffer('W', t.zeros(in_features, out_features, tensor_kwargs))
 
     def update(self, X, Y):
-        if self.unsqueeze:
-            #Add an extra copy dimension to X and Y.
-            X = X.unsqueeze(0)
-            Y = Y.unsqueeze(0)
-
-        assert X.shape[0] == self.copies
-        assert Y.shape[0] == self.copies
-        assert X.shape[-1] == self.in_features
-        assert Y.shape[-1] == self.out_features
-        X = X.view(self.copies, -1, self.in_features)
-        Y = Y.view(self.copies, -1, self.out_features)
-        assert X.shape[1] == Y.shape[1]
-
         self.XTX.update(X.mT @ X)
         self.XTY.update(X.mT @ Y)
 
-        XTX_plus_eps = self.XTX + t.eye(self.in_features, dtype=X.dtype, device=X.device)
+        XTX_plus_eps = self.XTX + self.eps * t.eye(self.in_features, dtype=X.dtype, device=X.device)
         chol_XTX_plus_eps = t.cholesky(XTX_plus_eps)
         
         # Solves XTX^{-1} XTY
         self.W.copy_(torch.cholesky_solve(self.XTY, chol_XTX_plus_eps)
 
-    def apply(self, x):
-        if self.unsqueeze:
-            #Add an extra copy dimension
-            x = x.unsqueeze(0)
+    def forward(self, X):
+        return x @ self.W
 
-        assert x.shape[0] == self.copies
-        assert x.shape[-1] == self.in_features
-        dims = x.shape[1:-1]
+class LinearRegressionL(nn.Module):
+    """
+    Multivariate linear regression.
+    Y = WL @ X
+    """
+    def __init__(self, in_features, out_features, beta=default_beta, eps=default_eps, tensor_kwargs=default_tensor_kwargs):
+        super().__init__()
+        self.linear_regression_r = LinearRegressionR(in_features, out_features, beta=beta, eps=eps, tensor_kwargs=tensor_kwargs)
 
-        x = x.view(self.copies, -1, self.in_features)
-        y = x @ self.W
-        y = y.view(self.copies, *dims, self.out_features)
+    def forward(self, X):
+        return self.linear_regression_r(X.mT).mT
 
-        if self.unsqueeze:
-            #Remove the extra copy dimension
-            y = y.squeeze(0)
-        return y
+    def update(self, X, Y):
+        self.linear_regression_r.update(X.mT, Y.mT)
+
+class KFacLinearRegression(nn.Module):
+    """
+    Solves 
+    Y = WL @ X @ WR
+    Basic strategy: coordinate descent on two separate linear regression problems.
+    Optimizing WR with,
+    Y = (WL @ X) @ WR
+    treating WL@X as the inputs.  And optimize WL with,
+    Y = WL @ (X @ WR)
+    treating X@WR as the inputs.
+
+    in_features = X.shape[-2:]
+    out_features = Y.shape[-2:]
+    """
+    def __init__(self, in_features, out_features, beta=default_beta, eps=default_eps, tensor_kwargs=default_tensor_kwargs):
+        super().__init__()
+
+        assert 2 == len(in_features)
+        assert 2 == len(out_features)
+
+        self.lin_reg_l = LinearRegressionL(
+            in_features = in_features[-2],
+            out_features = in_features[-2],
+            copies = None,
+            beta = beta,
+            eps = eps,
+            tensor_kwargs = tensor_kwargs
+        )
+        self.lin_reg_r = LinearRegressionR(
+            in_features = out_features[-1],
+            out_features = out_features[-1],
+            copies = None,
+            beta = beta,
+            eps = eps,
+            tensor_kwargs = tensor_kwargs
+        )
+
+    def update(self, X, Y):
+        self.lin_reg_l.update(self.lin_reg_r(X), Y)
+        self.lin_reg_r.update(self.lin_reg_l(X), Y)
+
+    def forward(self, X):
+        return self.lin_reg_l(self.lin_reg_r(X))
+
+class MultiOutputKFacLinearRegression(nn.Module):
+    """
+    Solves 
+    Y = WL_1 @ X_1 @ WR_1 + WL_2 @ X_2 @ WR_2 + ...
+    Basic strategy: coordinate descent on each KFacLinearRegression separately
+
+    in_features  = [X_1.shape, X_2.shape, ...]
+    out_features = Y.shape
+    """
+    def __init__(self, in_features, out_features, beta=default_beta, eps=default_eps, tensor_kwargs=default_tensor_kwargs):
+        super().__init__()
+
+        self.kfac_lin_regs = [KFacLinearRegression(ifs, out_features, beta=beta, eps=eps, tensor_kwargs=tensor_kwargs) for ifs in in_features]
+
+        assert isinstance(in_features, list)
+
+        self.lin_reg_l = LinearRegressionL(
+            in_features = left_in_features,
+            out_features = left_out_features,
+            copies = None,
+            beta = beta,
+            eps = eps,
+            tensor_kwargs = tensor_kwargs
+        )
+        self.lin_reg_r = LinearRegressionR(
+            in_features = right_in_features,
+            out_features = right_out_features,
+            copies = None,
+            beta = beta,
+            eps = eps,
+            tensor_kwargs = tensor_kwargs
+        )
+
+    def update(self, X, Y):
+        self.lin_reg_l.update(self.lin_reg_r(X), Y)
+        self.lin_reg_r.update(self.lin_reg_l(X), Y)
+
+    def forward(self, X):
+        return self.lin_reg_l(self.lin_reg_r(X))
 
 
 ##########################
@@ -355,21 +443,76 @@ class NoParamModule(nn.Module):
     def gamma_out(self, gamma_in, extra=None):
         """
         Default implementation for ops that map a single input to a single output.
-        Requires concrete classes to implement:
-            G_to_G
-            g_to_G
-            g_to_g
-        All of these methods assume a non-None input, and return a non-None output.
-
         This may be overridden, and will need to be overridden for classes that take/
         return multiple gammas.
         """
-        G_to_G = self.G_to_G(gamma_in.G, extra) if (gamma_in.G is not None) else None
-        g_to_G = self.g_to_G(gamma_in.g, extra) if (gamma_in.g is not None) else None
-        G = sum_none(g_to_G, G_to_G)
+        return Gamma(self.G_to_G(gamma_in.G, extra) if (gamma_in.G is not None) else None)
 
-        g      = self.g_to_g(gamma_in.g, extra) if (gamma_in.g is not None) else None 
-        return Gamma(G, g)
+class PassthroughModule(NoParamModule):
+    """
+    Takes mod (a module with a single input and single output tensor, such
+    as ReLU), and wraps it.  It doens't modify Gamma, so it just uses
+    passthrough.
+    """
+    def __init__(self, mod):
+        self.mod = mod
+
+    def forward(self, *args, **kwargs):
+        return self.mod(*args, **kwargs)
+
+    def gamma_out(self, gamma_in, extra=None):
+        return gamma_in.passthrough()
+
+class KFacLinRegModule(NoParamModule):
+    """
+    Takes mod (a module with a single input and single output tensor, such
+    as ReLU), and wraps it.
+
+    Does a full KFAC linear regression from input Gamma to output Gamma.
+
+    Inefficient, but useful for testing.
+    """
+    def __init__(self, mod):
+        self.mod = mod
+
+        #Init linear regression during forward when we know sizes.
+        self.kfac_lin_reg = None
+
+        self.x = None
+        self.y = None
+
+        def hook(mod, grad_input, grad_output):
+            #Compute Gammas at the input and output.
+            G_in = self.x.mT @ grad_input
+            G_out = self.y.mT @ grad_output
+
+            #Delete stored x and y.
+            self.x = None
+            self.y = None
+            mod.kfac_lin_reg.update(G_in, G_out)
+
+        self.register_full_backward_hook(hook)
+
+    def forward(self, x):
+        y = self.mod(x)
+
+        self.x = x.detach() #Store without gradients
+        self.y = y.detach() #Store without gradients
+
+        if self.kfac_lin_reg is None:
+            in_features = x.shape[0]
+            out_features = y.shape[0]
+            self.kfac_lin_reg = KFacLinearRegression(
+                left_in_features=in_features,
+                left_out_features=out_features, 
+                right_in_features=in_features, 
+                right_out_features=out_features, 
+                tensor_kwargs={'device':x.device, 'dtype':x.dtype}
+            )
+
+        return y
+
+
 
 class ElementwiseNonlin(NoParamModule):
     """
@@ -386,7 +529,9 @@ class ElementwiseNonlin(NoParamModule):
         self.eps  = eps
 
         #Stuff that isn't initialized immediately, because we don't know how many features
-        #there are going to be.
+        #there are going to be. Note that this doesn't cause the usual problems with lazily
+        #initialized parameters (e.g. params not included in optimizers), as there aren't
+        #any parameters here, just buffers.
         self.features      = None
         self.input_lin_reg = None
         self.grad_lin_reg  = None
