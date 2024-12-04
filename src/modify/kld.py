@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.linalg import triangular_solve
 
 import modify
 
@@ -294,6 +295,61 @@ class KFacLinearRegression(nn.Module):
     def forward(self, X):
         return self.lin_reg_l(self.lin_reg_r(X))
 
+class CovLinearRegression(nn.Module):
+    """
+    Takes a linear regression module, and gives a Kronecker factored estimate of
+    the covariance of the outputs.
+
+    X ~ MN(0, U, V)
+    E[X X'] = U Tr(V)
+    E[X' X] = V Tr(U)
+    T = Tr(E[X X']) = Tr(E[X' X]) = X.square().sum() = Tr(U) Tr(V)
+    U = E[X X'] / sqrt(T)
+    V = E[X' X] / sqrt(T)
+    """
+    def __init__(self, lin_reg, beta=default_beta):
+        super().__init__()
+        self.lin_reg = lin_reg
+        self.EET = EMA(beta=beta)
+        self.ETE = EMA(beta=beta)
+        self.T   = EMA(beta=beta)
+
+        self._chol_left = None
+        self._chol_right = None
+
+    def update(X, Y):
+        self.lin_reg.update(X, Y)
+        Ybar = self.lin_reg(X)
+        E = Y - Ybar
+        self.EET.update(E@E.mT)
+        self.ETE.update(E.mT@E)
+        self.T.update(E.square().sum())
+
+        #Wipe cached cholesky
+        self.chol_left = None
+        self.chol_right = None
+
+    def compute_chol(self):
+        T_rsqrt = self.T().rsqrt()
+        if self.chol_left is None:
+            self.chol_left  = t.cholesky(self.EET() * T_rsqrt)
+        if self.chol_right is None:
+            self.chol_right = t.cholesky(self.EET() * T_rsqrt)
+
+    def inv_chol_prod(self, grad):
+        self.compute_chol()
+        # grad_inv_chol_right_mT = grad @ chol_right^{-T}
+        grad_inv_chol_right_mT = triangular_solve(chol_right, grad.mT, upper=False).mT
+        return triangular_solve(chol_left, grad_inv_chol_right_mT, upper=False)
+
+    def chol_prod(self, iid_noise):
+        self.compute_chol()
+        return chol_left @ iid_noise @ chol_right.mT
+
+    def forward(X):
+        return self.lin_reg(X)
+         
+
 def tensor_sum(xs):
     total = xs[0]
     for x in xs[1:]:
@@ -408,16 +464,16 @@ class KLD():
     want to use a common gamma_out (gamma_in, vec_in -> gamma_out) to take vec_in as an input. 
     
     """
-    def __init__(self, mod):
+    def __init__(self, mod, *args, **kwargs):
         super().__init__()
         self.mod = mod
-        self.init()
+        self.init(*args, **kwargs)
 
     def init(self):
         pass
 
     def forward(self, *args, **kwargs):
-        self.mod(*args, **kwargs)
+        return self.mod(*args, **kwargs)
 
     def chol_vec(self, vec_in):
         """
@@ -649,17 +705,14 @@ class KFacCopy(NoParamModule):
 #### Classes with parameters ####
 #################################
 
-class Linear(KLD):
+class Linear(LeafModule):
     """
     There are two prediction problems here:
        gamma_in -> grad_w
        (gamma_in, grad_w) -> gamma_out
     (Note that this second linear regression would usually only depend on 
     """
-    def __init__(self, mod, indep_across_layers: bool):
-        super().__init__()
-        assert isinstance(mod, nn.Linear)
-        self.mod = mod
+    def init(self, indep_across_layers: bool):
         self.indep_across_layers = indep_across_layers
 
         self.out_features, self.in_features = self.mod.weight.shape
@@ -667,8 +720,7 @@ class Linear(KLD):
         if self.bias is not None:
             assert self.bias.shape == (self.out_features,)
 
-        self.lin_reg_grad_w = KFacLinearRegression()
-        self.lin_reg_grad_b = KFacLinearRegression()
+        self.lin_reg_grad = KFacLinearRegression()
         self.lin_reg_gamma_out = MultiInputKFacLinearRegression()
 
         def hook(mod, grad_output):
@@ -687,8 +739,8 @@ class Linear(KLD):
         #transpose of the inverse of the Cholesky of the right Kronecker factor of the covariance.
         self.register_buffer('invU', t.eye(self.in_features_bias))
 
-    def check(self, module_inputs, gamma_in):
-        assert isinstance(gamma_in, Gamma)
+    def check_inputs(self, gamma_in, vec_in):
+        assert isinstance(gamma_in, AbstractGamma)
         if gamma_in.G is not None:
             assert gamma_in.G.shape == (self.in_features, self.in_features)
         if gamma_in.g is not None:
