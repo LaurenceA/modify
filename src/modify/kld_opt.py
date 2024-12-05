@@ -598,3 +598,119 @@ class ElementwiseAffine():
             grad_module_outputs['bias'] = grad_bias
 
         return (grad_module_outputs, self.gamma_out(gamma_in, grad_module_outputs))
+
+class ElementwiseAffine():
+    """
+    ElementwiseAffine corresponds to a bias + scale (e.g. after LayerNorm).
+    Of course, we do have gradients for the bias + scale parameters, but
+    they're not very useful for predicting future gradients because they're
+    low-dimensional (just features, as opposed to in_features x out_features
+    for weights).
+
+    We therefore use the input Gamma to predict the gradients of bias + scale,
+    but we don't bother to use the gradients of bias + scale to update output
+    Gamma.
+    """
+    def __init__(self, mod, indep_across_layers):
+        super().__init__()
+        self.indep_across_layers = indep_across_layers
+        assert isinstance(mod, modify.ElementwiseAffine)
+
+        #Save weight matrix and bias vector for the underlying linear module.
+        #The .data takes mod.weight, which is an nn.Parameter and returns the underlying Tensor.
+        #this tensor won't e.g. appear in grad_model.parameters().
+        self.register_buffer('weight', mod.weight.data)                           # features
+        self.register_buffer('bias', None if mod.bias is None else mod.bias.data) # features or None
+
+        self.features = self.a.shape[0]
+        assert self.a.shape == (features,)
+
+        self.log_inv_std_weight = nn.Parameter(torch.ones(features))
+
+        if self.bias is not None:
+            assert self.bias.shape == (features,)
+            self.log_inv_std_bias = nn.Parameter(torch.ones(features))
+
+        self.s = nn.Parameter(torch.ones(self.features, 1))
+
+    def pred_weight_grad(self, gamma_in):
+        if gamma_in.G is not None and not self.indep_across_layers:
+            return self.s*gamma_in.G.diagonal()
+        else:
+            None
+
+    def pred_bias_grad(self, gamma_in):
+        if not self.indep_across_layers:
+            return mul_none(self.s, gamma_in.g)
+        else:
+            return None
+
+    def check(self, gamma_in, module_inputs):
+        assert isinstance(gamma_in, Gamma)
+        if gamma_in.G is not None:
+            gamma_in.G.shape == (self.features, self.features)
+
+        if gamma_in.g is not None:
+            gamma_in.g.shape == (self.features,)
+        
+        assert isinstance(module_inputs, dict)
+        module_inputs['weight'].shape == (self.features,)
+        if 'bias' in module_inputs:
+            module_inputs['bias'].shape == (self.features,)
+
+    def gamma_out(self, grads, gamma_in):
+        G = sum_none(
+            prod_none(gamma_in.G, self.s, self.weight),
+            prod_none(gamma_in.g, self.s, self.bias)
+        )
+
+        if 'bias' in grads:
+            g = grads['bias']
+        elif gamma_in.g is not None:
+            g = self.s * gamma_in.g
+        else:
+            g = None
+        return Gamma(G, g)
+
+
+    def _inv_chol_vec(self, grad_module_inputs, gamma_in):
+        """
+        Converts gradients sampled from the gradient model into IID noise.
+        """
+        self.check(grad_module_inputs, gamma_in)
+
+        noise_module_outputs = {}
+
+        grad_weight       = grad_module_inputs['weight']
+        corr_noise_weight = grad - self.pred_weight_grad(gamma_in)
+        iid_noise_weight  = self.log_inv_std_weight.exp() * corr_noise_weight 
+        noise_module_outputs['weight'] = iid_noise_weight 
+
+        if self.bias is not None:
+            grad_bias       = grad_module_inputs['bias']
+            corr_noise_bias = grad - self.pred_bias_grad(gamma_in)
+            iid_noise_bias  = self.log_inv_std_bias.exp() * corr_noise_bias 
+            noise_module_outputs['bias'] = iid_noise_bias 
+
+        return (noise_module_outputs, self.gamma_out(grad_module_inputs, gamma_in))
+
+    def _chol_vec(self, noise_module_inputs, gamma_in):
+        """
+        Converts IID noise into gradients from the gradient model.
+        """
+        self.check(noise_module_inputs, gamma_in)
+
+        grad_module_outputs = {}
+
+        iid_noise_weight  = noise_module_inputs['weight']
+        corr_noise_weight = (-self.log_inv_std_weight).exp() * iid_noise_weight
+        grad_weight       = corr_noise_weight + self.pred_weight_grad(gamma_in)
+        grad_module_outputs['weight'] = grad
+
+        if self.bias is not None:
+            iid_noise_bias  = noise_module_inputs['bias']
+            corr_noise_bias = (-self.log_inv_std_bias).exp() * iid_noise_bias
+            grad_bias       = corr_noise_bias + self.pred_bias_grad(gamma_in)
+            grad_module_outputs['bias'] = grad_bias
+
+        return (grad_module_outputs, self.gamma_out(gamma_in, grad_module_outputs))

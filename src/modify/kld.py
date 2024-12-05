@@ -1,3 +1,11 @@
+#TODOs:
+#  
+#Testing:
+#  Test all the linear regression stuff (generate data with the right distribution).
+#  Test inv_chol, chol on CovLinearRegression
+#  
+
+import math
 import torch
 import torch.nn as nn
 from torch.linalg import triangular_solve
@@ -5,7 +13,7 @@ from torch.linalg import triangular_solve
 import modify
 
 default_beta = 0.1
-default_eps = 10E-7
+default_eps = 1E-7
 
 #################################################
 #### Changed argument order for mat_vec_prod ####
@@ -15,48 +23,50 @@ default_eps = 10E-7
 #### Type for holding Gamma and gamma ####
 ##########################################
 
-def mean_except_last(x):
-    assert 1 <= x.ndim
-    if x.ndim == 1:
-        return x
-    else:
-        return x.mean(tuple(range(x.ndim - 1)))
+def true_gamma(output, grad, has_bias):
+    """
+    Returns a Tensor, not an AbstractGamma
+    """
+    assert isinstance(output, torch.Tensor)
+    assert isinstance(grad, torch.Tensor)
+    assert isinstance(has_bias, bool)
 
-def gamma_true(grad, x):
-    assert grad.shape == x.shape
-    features = x.shape[-1]
-    g = mean_except_last(grad)[:, None]
-    
-    x  = x.view( -1, features)
-    grad = grad.view(-1, features)
-
-    G = (grad.mT @ x) / x.shape[0]
-
-    return Gamma(G, g)
+    self.output = self.output.view(-1, self.output.shape[-1])
+    self.grad = self.grad.view(-1, self.grad_output.shape[-1])
+    gamma_out = self.output.mT @ grad_output / math.sqrt(self.output.shape[0]) #out_features   x out_features
+    if has_bias:
+        gamma_out = t.cat((gamma_out, grad.mean(0)), 0)                        #out_features +1   x out_features
+    return gamma_out                                                           #out_features(+1?) x out_features
 
 class AbstractGamma(): pass
+
+class SomeGamma(AbstractGamma):
+    """
+    This contains information about the previous gradients that we pass forward
+    to later modules.
+
+    Specifically, Gamma represents a prediction of:
+    Gamma = X^T dL/dX
+
+    Thus, without a bias Gamma is a square, features x features matrix.
+
+    With a bias, it is a features+1 x features matrix, as we include the bias
+    as an extra feature.
+    """
     def __init__(self, G):
-        assert isinstance(G, (type(None), torch.Tensor))
-        if G is not None:
-            assert 2 == G.ndim
-            assert G.shape[0] == G.shape[1]
-
         self.G = G
-    
-class Gamma(AbstractGamma):
-    def passthrough(self):
-        return PassThroughGamma(self.G)
+        assert 2 == self.G.ndim
+        self.features = self.G.shape[1]
+        assert self.G.shape[0] in (self.features+1, self.features)
+        self.has_bias = self.G.shape[0] == self.features+1
 
-class PassThroughGamma(AbstractGamma): pass
+class NoneGamma(AbstractGamma): 
     """
-    Represents a Gamma that does not even attempt to approximate
-    Gamma for the current activations.  This will usually occur
-    because we have passed Gamma straight through e.g. a ReLU
-    without trying to e.g. linearise the ReLU.    
+    Passed in to the network initally.  Implies that there is no information from
+    previous module's gradients to pass forward (because we're so early in the
+    network that there haven't been any previous modules yet).
     """
-    def passthrough(self):
-        return self
-
+    pass
 
 def validate_tuple(xs):
     """
@@ -81,15 +91,16 @@ def validate_tuple_or_gamma(xs):
 
 class EMA(nn.Module):
     """
-    Lazily initialized EMA
+    Lazily initialized exponential moving average (EMA).
     """
     def __init__(self, beta):
         self.beta = beta
-        self.ema = None
+        self.initialized = False
 
     def update(self, x):
-        if self.ema is None:
+        if not self.initialized:
             self.register_buffer('ema', t.zeros_like(x))
+            self.initialized = True
 
         assert x.shape == self.ema.shape
         assert x.device == self.ema.device
@@ -104,16 +115,17 @@ class Buffer(nn.Module):
     Lazily initialized Buffer
     """
     def __init__(self):
-        self.value = None
+        self.initialized = False
 
     def update(self, x):
-        if self.value is None:
+        if not self.initialized:
             self.register_buffer('value', x)
-        else:
-            assert x.shape == self.value.shape
-            assert x.device == self.value.device
-            assert x.dtype == self.value.dtype
-            self.value.copy_(x)
+            self.initialized = True
+
+        assert x.shape == self.value.shape
+        assert x.device == self.value.device
+        assert x.dtype == self.value.dtype
+        self.value.copy_(x)
 
     def forward(self):
         return self.value
@@ -149,7 +161,7 @@ class UnivariateLinearRegressionNoBias(nn.Module):
 
         self.xx.update((x*x).mean(0))
         self.xy.update((x*y).mean(0))
-        self.w.update(self.xy() / (self.x2() + self.eps))
+        self.w.update(self.xy() / (self.xx() + self.eps))
 
     def forward(self, x):
         return x * self.w()
@@ -202,9 +214,6 @@ class LinearRegressionR(nn.Module):
     """
     Multivariate linear regression.
     Y = X @ WR
-
-    In general, 3 dimensional inputs:
-    [separate_problems, samples, event_dim]
     """
     def __init__(self, beta=default_beta, eps=default_eps):
         super().__init__()
@@ -238,19 +247,16 @@ class LinearRegressionL(nn.Module):
     """
     Multivariate linear regression.
     Y = WL @ X
-
-    In general, 3 dimensional inputs:
-    [separate_problems, event_dim, samples]
     """
     def __init__(self, beta=default_beta, eps=default_eps):
         super().__init__()
-        self.linear_regression_r = LinearRegressionR(beta=beta, eps=eps)
+        self.lin_reg_r = LinearRegressionR(beta=beta, eps=eps)
 
     def forward(self, X):
-        return self.linear_regression_r(X.mT).mT
+        return self.lin_reg_r(X.mT).mT
 
     def update(self, X, Y):
-        self.linear_regression_r.update(X.mT, Y.mT)
+        self.lin_reg_r.update(X.mT, Y.mT)
 
 class KFacLinearRegression(nn.Module):
     """
@@ -282,10 +288,11 @@ class KFacLinearRegression(nn.Module):
         #After its been updated.  But we need to run forward on LinearRegressionL to 
         #update LinearRegressionR.  Solution is to fake the first forward using randomly
         #initialized weights.
+        #
+        #Note that we only need to do this fake initialization for one side.  As once we
+        #have initialized one side, we can use it to initialize the other side.
         if not self.initialized:
-            WL = t.randn(Y.shape[0], X.shape[0], device=X.device, dtype=X.device) * t.rsqrt(X.shape[0])
-            WR = t.randn(X.shape[1], Y.shape[1], device=X.device, dtype=X.device) * t.rsqrt(X.shape[1])
-            self.lin_reg_l.update(     X @ WR, Y)
+            WL = t.randn(Y.shape[0], X.shape[0], device=X.device, dtype=X.device) / math.sqrt(X.shape[0])
             self.lin_reg_r.update(WL @ X,      Y)
             self.initialized = True
             
@@ -294,6 +301,22 @@ class KFacLinearRegression(nn.Module):
 
     def forward(self, X):
         return self.lin_reg_l(self.lin_reg_r(X))
+
+class NoneRegression(nn.Module):
+    """
+    Has the same interface as the other regression methods, but takes None, and returns zeros.
+    """
+    def __init__(self):
+        self.zeros = Buffer()
+
+    def update(X,Y):
+        assert X is None
+        self.zeros.update(t.zeros_like(Y))
+
+    def forward(X):
+        assert X is None
+        return self.zeros()
+
 
 class CovLinearRegression(nn.Module):
     """
@@ -318,9 +341,10 @@ class CovLinearRegression(nn.Module):
         self._chol_right = None
 
     def update(X, Y):
+        assert 2 == X.ndim
+        assert 2 == Y.ndim
         self.lin_reg.update(X, Y)
-        Ybar = self.lin_reg(X)
-        E = Y - Ybar
+        E = Y - self.lin_reg(X)
         self.EET.update(E@E.mT)
         self.ETE.update(E.mT@E)
         self.T.update(E.square().sum())
@@ -336,17 +360,46 @@ class CovLinearRegression(nn.Module):
         if self.chol_right is None:
             self.chol_right = t.cholesky(self.EET() * T_rsqrt)
 
-    def inv_chol_prod(self, grad):
+    def chol_vec_noise(self, iid_niose):
+        """
+        Converts IID noise into correlated noise.
+        """
+        assert 2 == iid_noise.ndim
         self.compute_chol()
-        # grad_inv_chol_right_mT = grad @ chol_right^{-T}
-        grad_inv_chol_right_mT = triangular_solve(chol_right, grad.mT, upper=False).mT
-        return triangular_solve(chol_left, grad_inv_chol_right_mT, upper=False)
+        corr_noise = chol_left @ iid_noise @ chol_right.mT
+        return corr_noise
 
-    def chol_prod(self, iid_noise):
+    def inv_chol_vec_noise(self, corr_noise)
+        """
+        Converts correlated noise to IID noise.
+        Inverse of chol_vec_noise.
+        """
+        assert 2 == corr_noise.ndim
         self.compute_chol()
-        return chol_left @ iid_noise @ chol_right.mT
+        # chol_left_iid_noise = chol_left @ iid_noise = corr_noise @ chol_right^{-T} = (chol_right^{-1} @ corr_noise^T)^T
+        chol_left_iid_noise = triangular_solve(chol_right, corr_noise.mT, upper=False).mT
+        iid_noise = triangular_solve(chol_left, chol_left_iid_noise, upper=False)
+        return iid_noise
+
+    def chol_vec(self, X, iid_noise)
+        """
+        Converts iid noise to a sample of the gradient
+        """
+        corr_noise = self.chol_prod_noise(iid_noise)
+        grad = self.lin_reg(X) + corr_noise
+        return grad
+
+    def inv_chol_vec(self, X, grad)
+        """
+        Converts a sample of the gradient to IID noise.
+        Inverse of chol_vec.
+        """
+        corr_noise = grad - self.lin_reg(X)
+        iid_noise = self.inv_chol_prod_noise(corr_noise)
+        return iid_noise
 
     def forward(X):
+        assert 2 == X.ndim
         return self.lin_reg(X)
          
 
@@ -365,13 +418,40 @@ class AbstractMultiInputLR(nn.Module):
         LinearRegressionL
         KFacLinearRegression
 
-    For the update, we do 
+    The current implementation is quite naive, as we do coordinate descent on each function in sequence.
+
+    In the long-run, we might want to do this as one big KFAC, with structured inputs:
+                     X_1   0    WR_1
+    Y = (WL_1 WL_2) (        ) (    ) = WL_1 X_1 WR_1^T + WL_2 X_2 WR_2^T
+                      0   X_2   WR_2
+    To do this operation, we first compute,
+     X_1   0    WR_1     X_1 WR_1
+    (        ) (    ) = (        )
+      0   X_2   WR_2     X_2 WR_2
+    Then,
+                     X_1 WR_1
+    Y = (WL_1 WL_2) (        )
+                     X_2 WR_2 
+    The inputs to the first problem are a block diagonal matrix, while the inputs to the second problem are
+    a "block-vector".  Now, the problem is that we actually do learning using the second problem and the second
+    problem doesn't have any exploitable structure in the inputs, at least if you don't assume X_1 is independent
+    of X_2.
+
+    In some ways though, this is fine:  
+    * We would usually this to combine Parallel branches and we should be considering correlations across the 
+      branches.
+    * We only ever (in transformers) have two branches, so the increase in costs should be okay.
+
+    There is also a problem for the interface.  But that is easily resolvable.  Specifically, just provide two 
+    apply methods:
+    apply_block_diag
+    apply_block_vec
     """
     def __init__(self, beta=default_beta, eps=default_eps):
         super().__init__()
         self.beta = beta
         self.eps = eps
-        self.initialized=False
+        self.initialized = False
 
     def preprocess_inputs(Xs):
         """
@@ -396,27 +476,28 @@ class AbstractMultiInputLR(nn.Module):
         #first.  Solution is to assume other weights are zero for the first forward pass.
         if not self.initialized:
             self.lin_regs = [self.LR(beta=beta, eps=eps) for _ in Xs]
+            Y_over_lenXs = Y/len(Xs)
             for i in range(Xs):
                 #Divide by len(Xs) so we get the right answer on the first step for simple problems
-                self.lin_regs[i].update(Xs[i], Y/len(Xs)) 
+                self.lin_regs[i].update(Xs[i], Y_over_lenXs)
             self.initialized=True
 
         preds = self.preds(Xs)
 
         for i in range(Xs):
-            other_preds = [pred for (j, pred) in enumerate(preds) if i != j]
+            other_preds = [*preds[:i], preds[:i+1]]
             self.lin_regs[i].update(Xs[i], Y - tensor_sum(other_preds))
             #After updating lin_regs[i], update the corresponding prediction.
             #May not be necessary, but will give faster + more stable convergence.
             preds[i] = self.lin_regs(Xs[i])
 
     def preds(self, Xs):
-        assert len(Xs) == len(self.lin_regs)
-        return [self.lin_regs[i](Xs[i]) for i in range(len(self.kfac_lin_regs))]
+        return [lin_regs(X) for (lin_reg, X) in zip(self.lin_regs, Xs)]
 
     def forward(self, Xs):
         Xs = self.preprocess_inputs(Xs)
-        return tensor_sum(self.preds(Xs))
+        preds = self.preds(Xs)
+        return tensor_sum(preds)
 
 class MultiInputKFacLinearRegression(AbstractMultiInputLR):
     LR = KFacLinearRegression
@@ -444,8 +525,9 @@ class KLD():
 
     Three "types" of method:
     * Non-underscore methods.  These are user-accessible.  They just take a vector (represented as a dict)
-      with the smae shape as the parameters, and return a vector of the same shape.  They insert gamma_in=None.
-    * Single-underscore methods.  These check the input, and pass control on to the double underscore methods.
+      with the same shape as the parameters, and return a vector of the same shape.  They pass gamma_in=NoneGamma() downstream
+    * Single-underscore methods.  These check the input, and pass control on to the double underscore methods
+      implemented by concrete classes.
 
     chol_vec and inv_chol_vec:
     * computes the product of a vector with the Cholesky or inverse Cholesky of the Fisher (i.e. the covariance of the gradients)
@@ -459,19 +541,11 @@ class KLD():
     * _update       (gamma_in, vec_in -> gamma_out)
     * check_inputs  (gamma_in, vec_in -> None
 
-    Note that that you don't need to have vec_in (i.e. gradients) as an input to _update.  You could
-    just use gradients on the parameters.  The reason for doing it this way is because you probably
-    want to use a common gamma_out (gamma_in, vec_in -> gamma_out) to take vec_in as an input. 
-    
+    Note that that we chose to use vec_in in _update to represent the gradients.  You don't need to
+    make this choice: you could just use gradients on the parameters.  The reason for doing it this 
+    way is because you probably want to use a common gamma_out (gamma_in, vec_in -> gamma_out) which 
+    take vec_in as an input. 
     """
-    def __init__(self, mod, *args, **kwargs):
-        super().__init__()
-        self.mod = mod
-        self.init(*args, **kwargs)
-
-    def init(self):
-        pass
-
     def forward(self, *args, **kwargs):
         return self.mod(*args, **kwargs)
 
@@ -479,23 +553,21 @@ class KLD():
         """
         vec_in -> vec_out
         """
-        gamma_out, vec_out = self._chol_vec(Gamma(None), vec_in)
+        gamma_out, vec_out = self._chol_vec(gamma_in=NoneGamma(), vec_in)
         return vec_out
 
     def inv_chol_vec(self, vec_in):
         """
         vec_in -> vec_out
         """
-        gamma_out, vec_out = self._inv_chol_vec(Gamma(None), vec_in)
+        gamma_out, vec_out = self._inv_chol_vec(gamma_in=NoneGamma(), vec_in)
         return vec_out
 
     def update(self, vec_in):
         """
         vec_in (representing gradients) -> None
         """
-        self._update(Gamma(None))
-
-
+        gamma_out = self._update(gamma_in=NoneGamma(), vec_in)
 
 #################################
 #### Parallel and Sequential ####
@@ -505,8 +577,18 @@ class ModuleGroup(KLD):
     """
     Only used for Parallel and Sequential.
 
-    Doesn't define forward (its going to come by inheritence in Parallel and Sequential).
+    Uniquely, takes a dict of modules, _not_ the Sequential/Parallel module itself.
+    That's because it takes a dict of _wrapped_ modules, not the underlying modules themselves.
+
+    Forward comes from multiple inheritence of modify.Sequential / modify.Parallel.
+
+    Note that this class doesn't register the modules correctly, so e.g. mod.Parameters() won't work.
     """
+    def __init__(self, mods, indep_across_layers, initial_layer):
+        super().__init__()
+        assert isinstance(mods, dict)
+        self.mods = mods
+
     def _chol_vec(self, gamma_in, vec_in):
         return self.mat_vec_prod('_chol_vec', gamma_in, vec_in)
     def __inv_chol_vec(self, gamma_in, vec_in):
@@ -565,34 +647,38 @@ class Sequential(ModuleGroup, modify.Sequential):
 
 class LeafModule(KLD):
     """
-    For stuff like nonlinearities, Copy, Add, RMSNorm, LayerNorm.
-    All these modules don't have any parameters, so don't have any
-    gradients, and hence no module_inputs or module_results.  
-    All we need to do is propagate the Gamma.
+    For anything that isn't Sequential or Parallel, like Linear, 
+    nonlinearities, Copy, Add, RMSNorm, LayerNorm.
 
     This is an abstract class; concrete classes must override:
+    * __init__
     * __inv_chol_vec (gamma_in, vec_in -> vec_out)
     * __chol_vec     (gamma_in, vec_in -> vec_out)
     * __update       (gamma_in, vec_in -> None)
     * gamma_out      (gamma_in, vec_in -> gamma_out)
+    * check_inputs   (gamma_in, vec_in -> None)
 
     They may override: 
-    * init
     * forward
     """
     def _update(self, gamma_in, vec_in):
+        self.check_inputs(gamma_in, vec_in)
         self.__update(self, gamma_in, vec_in)
         return self.gamma_out(gamma_in, vec_in)
 
     def _inv_chol_vec(self, gamma_in, vec_in):
+        self.check_inputs(gamma_in, vec_in)
         return (self.gamma_out(gamma_in, vec_in), self.__inv_chol_vec(gamma_in, vec_in))
 
     def _chol_vec(self, gamma_in, vec_in):
+        self.check_inputs(gamma_in, vec_in)
         return (self.gamma_out(gamma_in, vec_in), self.__inv_chol_vec(gamma_in, vec_in)
 
 class NoParamModule(LeafModule):
     """
-    For stuff like nonlinearities, Copy, Add, RMSNorm, LayerNorm.
+    For stuff like nonlinearities, Copy, Add, RMSNorm, LayerNorm,
+    but _not_ Linear or ElementwiseAffine.
+
     All these modules don't have any parameters, so don't have any
     gradients, and hence no module_inputs or module_results.  
     All we need to do is propagate the Gamma.
@@ -605,10 +691,18 @@ class NoParamModule(LeafModule):
     * init
     * forward
     """
+    def __init__(self, mod, indep_across_layers, initial_layer):
+        super().__init__()
+        assert not initial_layer
+        self.mod = mod
+        self.init()
+
+    def init(self): 
+        pass
         
-    def check_inputs(self, gamma, vec):
-        assert isinstance(gamma, AbstractGamma)
-        assert isinstance(vec, dict) and (0==len(vec))
+    def check_inputs(self, gamma_in, vec_in):
+        assert isinstance(gamma_in, SomeGamma)
+        assert isinstance(vec_in, dict) and (0==len(vec_in))
 
     def __inv_chol_vec(self, gamma_in, vec_in):
         return {}
@@ -616,17 +710,17 @@ class NoParamModule(LeafModule):
     def __chol_vec(self, gamma_in, vec_in):
         return {}
 
-class PassthroughModule(NoParamModule):
-    """
-    Takes mod (a module with a single input and single output tensor, such
-    as ReLU), and wraps it.  It doens't modify Gamma, so doesn't do any updates:
-    it just passes through the gamma.
-    """
-    def __update(self, gamma_in, vec_in):
-        pass
-
-    def gamma_out(self, gamma_in, vec_in):
-        return gamma_in.passthrough()
+#class PassthroughModule(NoParamModule):
+#    """
+#    Takes mod (a module with a single input and single output tensor, such
+#    as ReLU), and wraps it.  It doens't modify Gamma, so doesn't do any updates:
+#    it just passes through the gamma.
+#    """
+#    def __update(self, gamma_in, vec_in):
+#        pass
+#
+#    def gamma_out(self, gamma_in, vec_in):
+#        return gamma_in.passthrough()
 
 class KFacModule(NoParamModule):
     """
@@ -635,69 +729,65 @@ class KFacModule(NoParamModule):
 
     It does a full KFAC linear regression from input Gamma to output Gamma.
 
-    Note that we use the actual Gamma_out, and the estimate/input Gamma_in.  That's
-    because we don't have access to the actual Gamma_in when we're actually running
-    we only have access to the estimated/input Gamma_in.
+    Note that we use the actual gamma_out, and the predicted gamma_in, because the
+    predicted gamma_in is what we actually have available at runtime!
 
     These modules are likely to be inefficient, but useful for testing.
     """
 
     def init(self):
-        self.y = None
-        self.gamma_out = None
+        self.output = None
+        self.grad_output = None
 
         self.lin_reg = MultiInputKFacLinearRegression()
 
         def hook(mod, grad_output):
-            #Compute Gammas at the input and output.
-            self.gamma_out = self.y.mT @ grad_output
-            #Delete stored x and y.
-            self.y = None
-
+            self.grad_output = grad_output
         self.register_full_backward_pre_hook(hook)
 
     def forward(self, *args, **kwargs):
-        y = self.mod(*args, **kwargs)
-        self.y = y.detach()
-        return y
+        output = self.mod(*args, **kwargs)
+        self.output = output.detach()
+        return output
 
     def __update(self, gamma_in, vec_in):
-        self.lin_reg.update(gamma_in, self.gamma_out)
-        self.gamma_out = None
+        gamma_out = true_gamma(self.output, self.grad_output, gamma_in.has_bias)
+        self.lin_reg(gamma_in, gamma_out)
+        #Delete stored output and grad.
+        self.output = None
+        self.grad_output = None
 
     def gamma_out(self, gamma_in, vec_in):
         return Gamma(self.kfac_lin_reg(gamma_in))
-        
 
 class KFacCopy(NoParamModule):
     """
     Copy is the only single input, multiple output module.  So we may as well handle this separately.
     """
     def init(self):
-        self.y = None
-        self.gamma_outs = None
+        self.output = None #Just one output, as they're all copies.
+        self.grad_outputs = None
 
+        #Eventual TODO: do the linear regressions in parallel, rather than separately.
         self.lin_regs = [KFacLinearRegression() for _ in mod.copies]
 
         def hook(mod, grad_outputs):
-            #Compute Gammas at the input and output.
-            self.gamma_outs = [y.mT @ go for (y, go) in zip(self.ys, grad_outputs)]
-            #Delete stored y.
-            self.y = None
-
+            self.grad_outputs = grad_outputs 
         self.register_full_backward_pre_hook(hook)
+
+    def forward(self, x):
+        self.output = x.detach() # As this is a copy module, each output is just a copy of the input.
+        return self.mod(*args, **kwargs)
 
     def gamma_out(self, gamma_in, vec_in):
         return [Gamma(lin_reg(gamma_in)) for lin_reg in self.lin_regs]
 
-    def forward(self, x):
-        self.y = x.detach() # As this is a copy module, x == ys[i]
-        return self.mod(*args, **kwargs)
-
     def __update(self, gamma_in, vec_in):
-        for i in range(self.mod.copies):
-            self.lin_reg[i].update(gamma_in, self.gamma_outs[i])
-        self.gamma_outs = None
+        for grad_output, lin_reg in zip(self.grad_outputs, self.lin_regs):
+            gamma_out = true_gamma(self.output, grad_output, gamma_in.has_bias)
+            lin_reg.update(gamma_in, gamma_outs)
+        self.output = None
+        self.grad_outputs = None
 
 
 
@@ -712,252 +802,112 @@ class Linear(LeafModule):
        (gamma_in, grad_w) -> gamma_out
     (Note that this second linear regression would usually only depend on 
     """
-    def init(self, indep_across_layers: bool):
+    def __init__(self, mod, indep_across_layers: bool, initial_layer:bool):
+        self.mod = mod
         self.indep_across_layers = indep_across_layers
+        self.initial_layer = initial_layer
+        self.zero_pred = initial_layer or indep_across_layers
 
-        self.out_features, self.in_features = self.mod.weight.shape
-        self.in_features_bias = self.in_features + int(mod.bias is not None)
-        if self.bias is not None:
-            assert self.bias.shape == (self.out_features,)
+        self.has_bias = mod.bias is not None
+        self.out_features, self.in_features = mod.weight.shape
+        self.in_features_bias = self.in_features + int(self.has_bias)
+        if self.has_bias:
+            assert self.mod.bias.shape == (self.out_features,)
 
-        self.lin_reg_grad = KFacLinearRegression()
+        self.lin_reg_grad = CovLinReg(None if self.zero_pred else KFacLinearRegression())
         self.lin_reg_gamma_out = MultiInputKFacLinearRegression()
 
-        def hook(mod, grad_output):
-            #Compute Gammas at the input and output.
-            self.gamma_out = self.y.mT @ grad_output
-            #Delete stored x and y.
-            self.y = None
+        self.output = None
+        self.grad_output = None
 
+        def hook(mod, grad_output):
+            self.grad_output = grad_output
         self.register_full_backward_pre_hook(hook)
 
-        #Inverses of the Kronecker factored Cholesky of the covariance matrix.
-        #chol^{-1}(cov_left), i.e. lower-triangular matrix, representing the 
-        #inverse of the Cholesky of the left Kronecker factor of the covariance.
-        self.register_buffer('invL', t.eye(self.out_features))
-        #chol^{-T}(cov_right) i.e. upper-triangular matrix, representing the
-        #transpose of the inverse of the Cholesky of the right Kronecker factor of the covariance.
-        self.register_buffer('invU', t.eye(self.in_features_bias))
+    def forward(self, *args, **kwargs):
+        output = self.mod(*args, **kwargs)
+        self.output = output.detach()
+        return output
 
     def check_inputs(self, gamma_in, vec_in):
+        assert isinstance(vec_in, dict)
         assert isinstance(gamma_in, AbstractGamma)
-        if gamma_in.G is not None:
-            assert gamma_in.G.shape == (self.in_features, self.in_features)
-        if gamma_in.g is not None:
-            assert gamma_in.g.shape == (self.in_features, 1)
 
-        assert isinstance(module_inputs, dict)
-        assert module_inputs["weight"].shape == (self.out_features, self.in_features)
+        if self.initial_layer:
+            assert isinstance(gamma_in, NoneGamma)
+        else:
+            assert isinstance(gamma_in, SomeGamma)
+            assert gamma_in.features == self.in_features
 
-        #Check gradients / noise in module_inputs match the shape of the weight and bias params.
-        assert (self.bias is not None) == ('bias' in module_inputs)
-        if 'bias' in module_inputs:
-            assert module_inputs["bias"].shape == (self.out_features,)
+        assert 'weight' in vec_in
+        assert vec_in['weight'].shape == (self.out_features, self.in_features)
+        if 'bias' in vec_in:
+            assert vec_in['weight'].shape == (self.out_features,)
+
+    def vec2tensor(self, vec_in):
+        """
+        Converts the dict vec_in to a tensor, including both the component
+        from the weight and the bias.
+        """
+        assert isinstance(vec, dict)
+        tensor = vec['weight'] # out_features x in_features
+
+        assert self.has_bias == ('bias' in vec_in)
+
+        if self.bias:
+            tensor_b = vec_in['bias']                  #out_features
+            tensor_b = result_b[:, None]               #out_features x 1
+            tensor = torch.cat((tensor, tensor_b), -1) #out_features x in_features+1
+
+        return tensor                                  #out_features x in_features(+1?)
+
+    def tensor2vec(self, tensor):
+        """
+        Converts the dict vec_in to a tensor, including both the component
+        from the weight and the bias.
+        """
+        assert tensor.shape == (self.out_features, self.in_features_bias)
+
+        if self.has_bias:
+            return {'weight': tensor[..., :-1], 'bias': tensor[..., -1]}
+        else
+            return {'weight': tensor}
+
+    def inputs_for_predicting_gamma_out(self, gamma_in, vec_in):
+        tensor_vec_in = self.tensor_vec_in(vec_in)
+        inputs = [tensor_vec_in]
+        if not self.initial_layer:
+            inputs.append(gamma_in.G)
+        return inputs
 
     def gamma_out(self, gamma_in, vec_in):
-        G = grads['weight'] @ self.weight.mT
-        if 'bias' in grads:
-            g = grads['bias'][:, None]
-        elif gamma_in.g is not None:
-            g = self.inv_weight_T @ gamma_in.g
-        else:
-            g = None
-        return Gamma(G, g)
+        return self.lin_reg_gamma_out(self.inputs_for_predicting_gamma_out(gamma_in, vec_in))
 
-    def pred_grad_w(self, gamma_in, grad_w):
-        #gamma_in.G is  in_features x in_features or None
-        #grad_w     is out_features x in_features
-        if self.indep_across_layers or (gamma_in.G is None)
-            return torch.zeros_like(grad_bias)
-        else:
-            return self.lin_reg_grad_w(gamma_in.G)
+    def __update(self, gamma_in, vec_in):
+        gamma_out = true_gamma(self.output, self.grad_output, gamma_in.has_bias or self.has_bias)
+        self.lin_reg_gamma_out.update(self.inputs_for_predicting_gamma_out(gamma_in, vec_in), gamma_out)
 
-    def pred_grad_b(self, gamma_in, grad_b):
-        #gamma_in.G is  in_features x in_features or None
-        #grad_b     is out_features x 1
-        if self.indep_across_layers or (gamma_in.G is None)
-            return torch.zeros_like(grad_b)
-        else:
-            return self.lin_reg_grad_b(gamma_in.G)
+        tensor_vec_in = self.tensor_vec_in(vec_in) #Represents gradient of weight and optionally bias.
+        self.lin_reg_grad.update(gamma_in.G, tensor_vec_in)
 
-    def __update(self, gamma_in):
-        self.lin_reg.update(gamma_in, self.gamma_out)
-        self.gamma_out = None
-
-
-    def _inv_chol_vec(self, grad_module_inputs, gamma_in):
+    def __inv_chol_vec(self, gamma_in, vec_in):
         """
         Converts gradients sampled from the gradient model into IID noise.
         """
-        self.check(grad_module_inputs, gamma_in)
+        tensor_in  = self.vec2tensor(vec_in)
+        tensor_out = self.lin_reg_grad.inv_chol_vec(tensor_in)
+        vec_out = self.tensor2vec(tensor_out)
+        return vec_out
 
-        grad      = grad_module_inputs['weight']     # out_features x in_features
-        pred_grad = self.pred_grad_w(gamma_in, grad) # out_features x in_features
-
-        if self.bias is not None:
-            grad_b = grad_module_inputs['bias'][:, None]        # out_features x 1
-            pred_grad_b = self.pred_bias_grad(gamma_in, grad_b) # out_features x 1
-            grad      = torch.cat((     grad,      grad_b), -1) # out_features x in_features+1
-            pred_grad = torch.cat((pred_grad, pred_grad_b), -1) # out_features x in_features+1
-
-        corr_noise = grad - pred_grad                       # out_features x in_features+1?
-        iid_noise  = self.invL() @ corr_noise @ self.invU() # out_features x in_features+1?
-
-        if self.bias is not None:
-            noise_module_outputs = {'weight': iid_noise[:, :-1], 'bias': iid_noise[:, -1]}
-        else:
-            noise_module_outputs = {'weight': iid_noise}
-
-        return (noise_module_outputs, self.gamma_out(grad_module_inputs, gamma_in))
-
-    def _chol_vec(self, noise_module_inputs, gamma_in):
+    def __chol_vec(self, noise_module_inputs, gamma_in):
         """
         Converts IID noise into gradients from the gradient model.
         """
-        self.check(noise_module_inputs, gamma_in)
-
-        iid_noise = noise_module_inputs['weight']              # out_features x in_features
-        pred_grad = self.pred_weight_grad(gamma_in, iid_noise) # out_features x in_features
-
-        if self.bias is not None:
-            iid_noise_b = noise_module_inputs['bias'][:, None]       # out_features x 1
-            pred_grad_b = self.pred_bias_grad(gamma_in, iid_noise_b) # out_features x 1 or None
-            iid_noise = torch.cat((iid_noise, iid_noise_b), -1)      # out_features x in_features+1
-            pred_grad = torch.cat((pred_grad, pred_grad_b), -1)      # out_features x in_features+1
-
-        #Computes:
-        #corr_noise = L^{-1} @ corr_noise @ U^{-1}
-        corr_noise = torch.linalg.solve_triangular(
-            self.invL(), 
-            torch.linalg.solve_triangular(self.invU(), iid_noise, upper=True, left=False),
-            upper=False,
-        )                             # out_features x in_features+1?
-        grad = corr_noise + pred_grad # out_features x in_features+1?
-
-        if self.bias is not None:
-            grad_module_outputs = {'weight': grad[:, :-1], 'bias': grad[:, -1]}
-        else:
-            grad_module_outputs = {'weight': grad}
-
-        return (grad_module_outputs, self.gamma_out(grad_module_outputs, gamma_in))
+        tensor_in  = self.vec2tensor(vec_in)
+        tensor_out = self.lin_reg_grad.chol_vec(tensor_in)
+        vec_out = self.tensor2vec(tensor_out)
+        return vec_out
     
-
-class ElementwiseAffine():
-    """
-    ElementwiseAffine corresponds to a bias + scale (e.g. after LayerNorm).
-    Of course, we do have gradients for the bias + scale parameters, but
-    they're not very useful for predicting future gradients because they're
-    low-dimensional (just features, as opposed to in_features x out_features
-    for weights).
-
-    We therefore use the input Gamma to predict the gradients of bias + scale,
-    but we don't bother to use the gradients of bias + scale to update output
-    Gamma.
-    """
-    def __init__(self, mod, indep_across_layers):
-        super().__init__()
-        self.indep_across_layers = indep_across_layers
-        assert isinstance(mod, modify.ElementwiseAffine)
-
-        #Save weight matrix and bias vector for the underlying linear module.
-        #The .data takes mod.weight, which is an nn.Parameter and returns the underlying Tensor.
-        #this tensor won't e.g. appear in grad_model.parameters().
-        self.register_buffer('weight', mod.weight.data)                           # features
-        self.register_buffer('bias', None if mod.bias is None else mod.bias.data) # features or None
-
-        self.features = self.a.shape[0]
-        assert self.a.shape == (features,)
-
-        self.log_inv_std_weight = nn.Parameter(torch.ones(features))
-
-        if self.bias is not None:
-            assert self.bias.shape == (features,)
-            self.log_inv_std_bias = nn.Parameter(torch.ones(features))
-
-        self.s = nn.Parameter(torch.ones(self.features, 1))
-
-    def pred_weight_grad(self, gamma_in):
-        if gamma_in.G is not None and not self.indep_across_layers:
-            return self.s*gamma_in.G.diagonal()
-        else:
-            None
-
-    def pred_bias_grad(self, gamma_in):
-        if not self.indep_across_layers:
-            return mul_none(self.s, gamma_in.g)
-        else:
-            return None
-
-    def check(self, gamma_in, module_inputs):
-        assert isinstance(gamma_in, Gamma)
-        if gamma_in.G is not None:
-            gamma_in.G.shape == (self.features, self.features)
-
-        if gamma_in.g is not None:
-            gamma_in.g.shape == (self.features,)
-        
-        assert isinstance(module_inputs, dict)
-        module_inputs['weight'].shape == (self.features,)
-        if 'bias' in module_inputs:
-            module_inputs['bias'].shape == (self.features,)
-
-    def gamma_out(self, grads, gamma_in):
-        G = sum_none(
-            prod_none(gamma_in.G, self.s, self.weight),
-            prod_none(gamma_in.g, self.s, self.bias)
-        )
-
-        if 'bias' in grads:
-            g = grads['bias']
-        elif gamma_in.g is not None:
-            g = self.s * gamma_in.g
-        else:
-            g = None
-        return Gamma(G, g)
-
-
-    def _inv_chol_vec(self, grad_module_inputs, gamma_in):
-        """
-        Converts gradients sampled from the gradient model into IID noise.
-        """
-        self.check(grad_module_inputs, gamma_in)
-
-        noise_module_outputs = {}
-
-        grad_weight       = grad_module_inputs['weight']
-        corr_noise_weight = grad - self.pred_weight_grad(gamma_in)
-        iid_noise_weight  = self.log_inv_std_weight.exp() * corr_noise_weight 
-        noise_module_outputs['weight'] = iid_noise_weight 
-
-        if self.bias is not None:
-            grad_bias       = grad_module_inputs['bias']
-            corr_noise_bias = grad - self.pred_bias_grad(gamma_in)
-            iid_noise_bias  = self.log_inv_std_bias.exp() * corr_noise_bias 
-            noise_module_outputs['bias'] = iid_noise_bias 
-
-        return (noise_module_outputs, self.gamma_out(grad_module_inputs, gamma_in))
-
-    def _chol_vec(self, noise_module_inputs, gamma_in):
-        """
-        Converts IID noise into gradients from the gradient model.
-        """
-        self.check(noise_module_inputs, gamma_in)
-
-        grad_module_outputs = {}
-
-        iid_noise_weight  = noise_module_inputs['weight']
-        corr_noise_weight = (-self.log_inv_std_weight).exp() * iid_noise_weight
-        grad_weight       = corr_noise_weight + self.pred_weight_grad(gamma_in)
-        grad_module_outputs['weight'] = grad
-
-        if self.bias is not None:
-            iid_noise_bias  = noise_module_inputs['bias']
-            corr_noise_bias = (-self.log_inv_std_bias).exp() * iid_noise_bias
-            grad_bias       = corr_noise_bias + self.pred_bias_grad(gamma_in)
-            grad_module_outputs['bias'] = grad_bias
-
-        return (grad_module_outputs, self.gamma_out(gamma_in, grad_module_outputs))
-
 def rms_norm(mod):
     result = [RMSNorm(mod)]
     if mod.affine:
@@ -970,26 +920,26 @@ def layer_norm(mod):
         result.append(ElementwiseAffine(mod))
     return modify.Sequential(result)
 
-kld_module_group = {
-    modify.Sequential: Sequential,
-    modify.Parallel: Parallel,
-}
 kld_modules = {
-    modify.ElementwiseNonlin: ElementwiseNonlin,
-    nn.Linear: Linear,
-    modify.ElementwiseAffine: ElementwiseAffine,
-    modify.Copy: Copy,
-    modify.Add: Add,
-    modify.Mul: Mul,
-    nn.RMSNorm: rms_norm,
-    nn.LayerNorm: layer_norm,
+    nn.Linear: Linear, #Explicit implementation.
+    modify.Copy: Copy, #Explicit implementation.
+    modify.ElementwiseNonlin: KFacModule, #ElementwiseNonlin,
+    modify.Add: KFacModule, #Add,
+    modify.Mul: KFacModule, #Mul,
+    #nn.RMSNorm: rms_norm,
+    #nn.LayerNorm: layer_norm,
 }
 
-def kldify(mod, indep_across_layers=False):
-    if isinstance(mod, modify.ModuleGroup):
-        return kld_module_group[type(mod)]({k: kldify(v, indep_across_layers) for (k, v) in mod.mods.items()})
+def kldify(mod, indep_across_layers=False, initial_layer=True):
+    if isinstance(mod, modify.Sequential):
+        mods = {}
+        for (i, (k, v)) in enumerate(mod.mods.items()):
+            mods[k] = kldify(v, indep_across_layers, i==0)
+        return Sequential(mods)
+    elif isinstance(mod, modify.Parallel):
+        return Parallel({k: kldify(v, indep_across_layers, initial_layer) for (k, v) in mod.mods.items()})
     elif type(mod) in kld_modules:
-        return kld_modules[type(mod)](mod, indep_across_layers)
+        return kld_modules[type(mod)](mod, indep_across_layers, initial_layer)
     else:
         raise Exception(f"KLD doesn't know how to handle {type(mod)}")
 
@@ -1015,15 +965,6 @@ def grad2dict(mod):
         return v.grad
 
     return param2dict(f, mod)
-    #result = {}
-    #if isinstance(mod, modify.ModuleGroup):
-    #    for (k, m) in mod.mods.items():
-    #        result[k] = grad2dict(m)
-    #else:
-    #    for (k, v) in mod.named_parameters():
-    #        assert v.grad is not None
-    #        result[k] = v.grad
-    #return result
 
 def noise_dict(mod):
     """
@@ -1056,10 +997,6 @@ def map_dict(f, d):
         else:
             result[k] = f(v)
     return result
-
-def square_sum(d):
-    terms = [square_sum(v) if isinstance(v, dict) else v.square().sum() for v in d.values()]
-    return sum_none(*terms)
 
 def natural_grad(model, grad_model):
     """
